@@ -1192,6 +1192,11 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
           test.environment = 'jsdom';
         }
 
+        // Vitest 5 inline projects reuse the root server and never run this hook (#369).
+        if (userTest.projects && userTest.sharedViteServer === undefined) {
+          test.sharedViteServer = false;
+        }
+
         if (serverTestPosture) {
           // The worker pool is shared across the whole vitest workspace and
           // imports externalized deps natively with `--conditions` derived

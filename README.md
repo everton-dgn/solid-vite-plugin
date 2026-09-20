@@ -1045,6 +1045,8 @@ test: {
 },
 ```
 
+The posture is chosen while each project resolves its own Vite config. Vitest 5 lets inline projects reuse the root Vite server instead (`test.sharedViteServer`, on by default), which skips that step, so the plugin sets `sharedViteServer: false` when the root config declares `test.projects`. Setting the option yourself overrides this; with `true`, every shared project runs with the root config's posture and without the injected `jest-dom` setup file.
+
 # Credits
 
 - [solid-js](https://github.com/solidjs/solid)
