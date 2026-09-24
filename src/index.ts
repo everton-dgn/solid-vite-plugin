@@ -192,10 +192,13 @@ export interface ExtensionOptions {
 
 export type Compiler = 'babel' | 'native';
 /**
- * Which source names the compilers carry into output for the dev and
- * observe runtimes to label the reactive graph with (see
+ * Which source names are carried into output for the dev and observe
+ * runtimes to label the reactive graph with (see
  * `Options.solid.sourceNames`). Each kind defaults to the posture: on for
- * dev and `observe`, off for production.
+ * dev and `observe`, off for production builds. `components` and `bindings`
+ * are the JSX compiler's `sourceNames` option; `primitives` is the native
+ * compiler's standalone `transformSourceNames` pass, which the plugin runs
+ * on every module — babel apps included.
  */
 export interface SourceNamesOptions {
   /** `createComponent(Home, props, "Home")` — owners labelled `<Home>`. */
@@ -205,8 +208,9 @@ export interface SourceNamesOptions {
   /**
    * Primitives named after the identifier they are declared as —
    * `createSignal(0, { name: "count" })`, `createCounter.value` inside a
-   * composed primitive — by the compiler's `transformSourceNames` pass. Runs
-   * on `.ts`/`.js` modules as well as components (outside node_modules).
+   * composed primitive — by the native compiler's `transformSourceNames`
+   * pass. Runs on `.ts`/`.js` modules as well as components (outside
+   * node_modules), whichever JSX compiler the app uses.
    */
   primitives?: boolean;
 }
@@ -214,7 +218,8 @@ export interface SourceNamesOptions {
 export type SolidOptions = Omit<JsxCompilerOptions, 'filename' | 'sourceMap' | 'sourceNames'> & {
   /**
    * Source names in output: `true`/`false` for every kind, or per kind.
-   * Defaults to the posture — on for dev and `observe`, off for production.
+   * Defaults to the posture — on for dev and `observe`, off for production
+   * builds; `false` opts out of every kind, in dev too.
    */
   sourceNames?: boolean | SourceNamesOptions;
 };
@@ -630,21 +635,39 @@ function getSolidOptions(
   // the arguments, so they are only emitted for the postures whose runtime
   // reads them. Primitive names are the separate transformSourceNames pass
   // (see getSourceNames / the transform hook), not a JSX-compiler option.
+  //
+  // The compilers default their own `sourceNames` on under `dev` (rc.10), so
+  // the resolved value is always passed — `false` when both kinds are off —
+  // and the plugin's table below, not the compiler default, decides. That is
+  // what makes `solid.sourceNames: false` an opt-out in dev rather than a
+  // no-op.
   const { sourceNames: _userSourceNames, ...userSolidOptions } = options.solid || {};
   const { components, bindings } = getSourceNames(options, dev, observe);
   return {
     ...solidOptions,
     ...(serverComponents && solidOptions.generate === 'ssr' ? { serverComponents: true } : {}),
     dev,
-    ...(components || bindings ? { sourceNames: { components, bindings } } : {}),
+    sourceNames: components || bindings ? { components, bindings } : false,
     ...userSolidOptions,
   };
 }
 
 /**
- * The resolved `solid.sourceNames` posture: every kind defaults to on for
- * dev and `observe` and off for production; `true`/`false` sets all three,
- * an object overrides per kind.
+ * Resolve `solid.sourceNames` to one flag per kind — `components` and
+ * `bindings` go to the JSX compiler, `primitives` gates the standalone
+ * `transformSourceNames` pass in the transform hook.
+ *
+ * The default follows the posture. `dev` here is the same flag the compilers
+ * receive as `dev` (`options.dev`, which defaults to on under `vite dev` and
+ * off for `vite build`), and `observe` is `options.observe`; those are the
+ * two runtimes that read the names, and the production runtime ignores them.
+ *
+ * | `solid.sourceNames`     | dev or observe            | production                 |
+ * | ----------------------- | ------------------------- | -------------------------- |
+ * | (unset)                 | all on                    | all off                    |
+ * | `true`                  | all on                    | all on                     |
+ * | `false`                 | all off                   | all off                    |
+ * | `{ kind: true/false }`  | as given; the rest on     | as given; the rest off     |
  */
 function getSourceNames(
   options: Partial<Options>,
