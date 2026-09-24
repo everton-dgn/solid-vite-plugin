@@ -133,8 +133,9 @@ This is useful for extra logs and debug.
 Resolve Solid's observe builds in production: the production-speed runtime that keeps the
 diagnostics and attribution channels (`OBSERVE`) alive for observability tooling (error
 monitoring, performance tracing). Adds the `observe` export condition to every environment
-and turns on the compiler's `componentNames` option, so component owner labels (`<Home>`)
-survive minification. Under `vite dev` the dev build still wins.
+and turns on the compiler's source names (see `options.solid.sourceNames`), so graph labels
+(`<Home>`, `span.textContent`, `count`) survive minification. Under `vite dev` the dev build
+still wins.
 
 #### options.hot
 
@@ -934,6 +935,24 @@ Pass additional Solid JSX compiler options. Both backends carry the Solid
 defaults (`moduleName: "@solidjs/web"`, the control-flow built-ins,
 custom-element context, and conditional wrapping) internally; anything set
 here is merged over them and applied to whichever backend is selected.
+
+##### options.solid.sourceNames
+
+- Type: `boolean | { components?: boolean; bindings?: boolean; primitives?: boolean }`
+- Default: on for dev and `observe`, off for production builds
+
+Which names as written in source are carried into output so the dev and observe runtimes
+can label the reactive graph after minification — in diagnostics, `whyDidRun` chains, error
+owner paths, and the Chrome performance tracks. `components` emits the tag name
+(`createComponent(Home, props, "Home")` → owners read `<Home>`); `bindings` names compiled
+binding effects by what they write (`span.textContent`, `div.class:active`, a hole
+`div.children`); `primitives` names `createSignal`/`createMemo`/`createStore`/… after the
+identifier they are declared as (`count`, `doubled`, `todos.title`), prefixed with the enclosing
+non-component function for composed primitives (`createCounter.value`). Primitives are named by
+the compiler's `transformSourceNames` pass, which runs on `.ts`/`.js` modules as well as
+components (never inside `node_modules`) and never overrides an explicit `name` option. The
+production runtimes ignore the names, so production builds do not carry them. `true`/`false` sets
+every kind; an object overrides per kind, the rest keeping the posture default.
 
 #### options.typescript
 
