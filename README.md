@@ -28,7 +28,8 @@ Join [solid discord](https://discord.com/invite/solidjs) and check the [troubles
 
 ## Requirements
 
-This module is 100% ESM compatible and requires Node.js `^20.19.0 || >=22.12.0`.
+This module is 100% ESM compatible and requires Node.js `>=22.12.0` (the same
+floor as the `solid-js` 2.0 runtime packages).
 
 You can check your current Node.js version by running `node -v`. Use a version
 manager such as [Volta](https://volta.sh/) or [nvm](https://github.com/nvm-sh/nvm)

@@ -1313,6 +1313,30 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
 
       // fix for bundling dev in production
       const nestedDeps = replaceDev ? ['solid-js', '@solidjs/web'] : [];
+      // `@solidjs/signals` is the reactive core `solid-js` depends on.
+      // `@solidjs/diagnostics/browser` and `solid-js/attribution` import it
+      // directly, so a nested/duplicated install (npm nesting a second copy
+      // under a package that lists it as a dependency) yields a second
+      // engine beside the one `solid-js` loads — the same two-engines
+      // symptom the `optimizeDeps.include` entries below guard against on
+      // the pre-bundle path. Dedupe it to the app's copy — but only when the
+      // app root can reach one. `resolve.dedupe` resolves the listed package
+      // from the root, and Vite's Node-side resolver (`fetchModule` for
+      // externalized SSR imports, and the externalize decision itself) has
+      // no importer fallback when that misses. Under pnpm's isolated layout
+      // signals exists only as `solid-js`'s transitive dependency, so with
+      // the entry always on, `import "@solidjs/signals"` from the inlined
+      // `solid-js` fails with ERR_MODULE_NOT_FOUND as soon as anything
+      // externalizes it (vitefu does, once a semi-framework package such as
+      // `@solidjs/diagnostics` lists it under `dependencies`). With no root
+      // copy there is nothing to dedupe TO, so the gate loses nothing. Not
+      // added to `optimizeDeps.include`: the optimizer already reaches
+      // signals through `solid-js`, and an include entry that doesn't
+      // resolve from the root logs a warning on every start.
+      const dedupe =
+        replaceDev && findPackageDir('@solidjs/signals', path.resolve(projectRoot || process.cwd()))
+          ? [...nestedDeps, '@solidjs/signals']
+          : nestedDeps;
 
       const userTest = (userConfig as any).test ?? {};
       const test = {} as any;
@@ -1387,7 +1411,7 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
         // esbuild: { include: /\.ts$/ },
         // resolve.conditions is handled per-environment in configEnvironment.
         resolve: {
-          dedupe: nestedDeps,
+          dedupe,
         },
         optimizeDeps: {
           extensions: ['.tsrx'],
