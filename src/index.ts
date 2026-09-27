@@ -14,6 +14,11 @@ import {
 } from './dev-manifest.js';
 import { boundaryModules } from './boundary-modules.js';
 import { solidDiagnostics } from './diagnostics/index.js';
+import {
+  resolvePerformanceTracksOptions,
+  solidPerformanceTracks,
+  type PerformanceTracksOption,
+} from './performance-tracks/index.js';
 
 import {
   normalizeServerFunctionsEndpoint,
@@ -301,6 +306,30 @@ export interface Options {
    * @default undefined (auto-detect)
    */
   diagnostics?: boolean;
+  /**
+   * Dev-serve only: paint Solid's records — re-runs, interactions, holds,
+   * async flights, navigations, server-function calls — as custom tracks
+   * in the Chrome Performance panel (`@solidjs/web/performance-tracks`),
+   * without the app calling `enablePerformanceTracks()` itself. Injects a
+   * client module that enables the tracks ahead of the app's entry (a
+   * `<head>` script for index.html apps, an import at the top of the
+   * start-mode client entry), so hydration and the first interaction are
+   * on the timeline. The dev server already writes its side of the work
+   * (`Server-Timing`), which the tracks read back.
+   *
+   * Omitted or `true` enables under `vite dev` with the adapter's defaults;
+   * an object enables with those options passed through
+   * (`PerformanceTracksOptions` from `@solidjs/web/performance-tracks`:
+   * `minMs`, `rich`, `attribution` — plain data, serialized into the
+   * injected module); `false` opts out. Never active on `vite build` —
+   * not for `dev: true` or `observe` builds (an observe app enables its
+   * own tracks in production) — in test mode (vitest), or on preview.
+   * With `dev: false` (and no `observe`) the production runtime is served
+   * and the adapter is a no-op.
+   *
+   * @default true
+   */
+  performanceTracks?: PerformanceTracksOption;
   /**
    * Whether the app is server-rendered — one meaning everywhere.
    *
@@ -1051,6 +1080,10 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
   // `start.external` only means something when a server side exists to hand
   // over (SSR start mode); in client mode it is a documented no-op.
   const externalDevServer = !!options.ssr && !!startOptions?.external;
+  // Chrome Performance panel tracks: `null` opts out, otherwise the options
+  // the injected module enables them with (dev serve only; see the
+  // `solid:performance-tracks` plugin and the start-mode entry codegen).
+  const performanceTracksOptions = resolvePerformanceTracksOptions(options.performanceTracks);
 
   let needHmr = false;
   let replaceDev = false;
@@ -2238,6 +2271,7 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
         ssr: !!options.ssr,
         styleFilter: filterDevStyles,
         diagnostics: options.diagnostics ?? 'auto',
+        performanceTracks: performanceTracksOptions !== null,
         onDocumentResolved(documentPath) {
           // Normalize to forward slashes to match Vite's transform ids.
           documentModuleId = documentPath ? documentPath.split(path.sep).join('/') : null;
@@ -2255,6 +2289,14 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
   // `@solidjs/diagnostics` installed).
   if (options.diagnostics !== false) {
     plugins.push(solidDiagnostics(options.diagnostics === true ? true : 'auto'));
+  }
+
+  // Chrome Performance panel tracks, on by default (dev serve only — the
+  // plugin no-ops itself for builds and preview via `apply`). Start mode
+  // imports the module from the client entry (`performanceTracks` above);
+  // plain apps get it from this plugin's `transformIndexHtml`.
+  if (performanceTracksOptions !== null) {
+    plugins.push(solidPerformanceTracks(performanceTracksOptions));
   }
 
   // Builder-mode (environments API) client-before-server build ordering.

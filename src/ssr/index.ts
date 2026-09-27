@@ -66,6 +66,10 @@ import {
 } from '../devtools/index.js';
 import { DIAGNOSTICS_CLIENT_ID, detectDiagnosticsPackage } from '../diagnostics/index.js';
 import {
+  PERFORMANCE_TRACKS_CLIENT_ID,
+  detectPerformanceTracksSubpath,
+} from '../performance-tracks/index.js';
+import {
   collectDevStyles,
   collectDevStyleSources,
   type DevStyleFilter,
@@ -634,6 +638,14 @@ export function startServe(
     /** `'auto'` = enable when the app has `@solidjs/diagnostics` installed. */
     diagnostics?: boolean | 'auto';
     /**
+     * Import the Chrome Performance panel tracks module
+     * (`virtual:solid-performance-tracks`, served by the
+     * `solid:performance-tracks` plugin) at the top of the client entry
+     * under dev serve. Skipped, like that plugin, when the app's
+     * `@solidjs/web` lacks the subpath.
+     */
+    performanceTracks?: boolean;
+    /**
      * Reports the resolved document shell path (absolute, or null when the
      * built-in virtual document is used) back to the main plugin, which
      * declines HMR for that module's client compile (solidjs/solid#3151).
@@ -673,6 +685,9 @@ export function startServe(
   // `'auto'` resolves against the project root in configResolved, before
   // any of the (lazy) uses in entry codegen and the entry transform.
   let diagnostics = internal.diagnostics === true;
+  // Resolved in configResolved (dev serve, non-test, subpath present) —
+  // the performance-tracks import is the first line of the client entry.
+  let performanceTracks = false;
   let devtoolsEnabled = false;
   // Toolbar detection, memoized per consumer: whether @solidjs/start-devtools
   // resolves at all, and the app importer it was probed from. Only the
@@ -989,6 +1004,17 @@ export function startServe(
     // never see this import (mirrors the plugin's own serve-only `apply`).
     const diagnosticsImport =
       diagnostics && !isBuild ? [`import ${JSON.stringify(DIAGNOSTICS_CLIENT_ID)};`] : [];
+    // Dev-serve-only likewise, and FIRST: the tracks must be enabled before
+    // anything renders — the module's side effect runs in import order, so
+    // it precedes the toolbar's and the app's module evaluation and the
+    // render/hydration call below, which land on the timeline. (The JSX
+    // compiler hoists its own runtime helper import above it; evaluating
+    // `@solidjs/web` renders nothing.) `performanceTracks` is already false
+    // on builds (configResolved), so the import can never reach a bundle.
+    const performanceTracksImport =
+      performanceTracks && !isBuild
+        ? [`import ${JSON.stringify(PERFORMANCE_TRACKS_CLIENT_ID)};`]
+        : [];
     if (clientMode) {
       // render(), not hydrate(): the shell's body is empty, the app mounts
       // fresh. Client code compiles non-hydratable in client mode, so the
@@ -996,6 +1022,7 @@ export function startServe(
       // without `async` (plain module = deferred), so document.body is
       // complete when this runs.
       return [
+        ...performanceTracksImport,
         ...diagnosticsImport,
         `import { render } from '@solidjs/web';`,
         ...errorBoundaryImport(),
@@ -1012,6 +1039,7 @@ export function startServe(
       ].join('\n');
     }
     return [
+      ...performanceTracksImport,
       ...diagnosticsImport,
       `import { hydrate } from '@solidjs/web';`,
       ...(toolbar ? [`import { DevToolbar } from ${JSON.stringify(DEVTOOLS_PACKAGE)};`] : []),
@@ -1611,6 +1639,14 @@ export function startServe(
         if (internal.diagnostics === 'auto' && !isBuild && config.mode !== 'test') {
           diagnostics = detectDiagnosticsPackage(root);
         }
+        // Same gates as the `solid:performance-tracks` plugin's `apply` +
+        // subpath guard (which owns the warning when the guard fails), so
+        // the entry only imports a module that plugin serves. Preview needs
+        // no gate here: it serves the built artifact — neither the entry
+        // codegen nor the entry transform below runs under it.
+        if (internal.performanceTracks && !isBuild && config.mode !== 'test') {
+          performanceTracks = detectPerformanceTracksSubpath(root);
+        }
         if (isBuild && nodeEntry) {
           const environments = (config as any).environments ?? {};
           const clientBuild = environments.client?.build ?? config.build;
@@ -1781,7 +1817,7 @@ export function startServe(
         return null;
       },
       async transform(code, id, opts) {
-        if (isBuild || (!devtoolsEnabled && !diagnostics)) return null;
+        if (isBuild || (!devtoolsEnabled && !diagnostics && !performanceTracks)) return null;
         const current = requireEntries();
         if (current.generated || getEnvironmentConsumer(this.environment, opts) !== 'client') {
           return null;
@@ -1792,6 +1828,11 @@ export function startServe(
           return null;
         }
         const injected: string[] = [];
+        // First, for the same reason as in the generated entry: enabled
+        // before the authored entry's own imports evaluate.
+        if (performanceTracks) {
+          injected.push(`import ${JSON.stringify(PERFORMANCE_TRACKS_CLIENT_ID)};`);
+        }
         if (diagnostics) injected.push(`import ${JSON.stringify(DIAGNOSTICS_CLIENT_ID)};`);
         if (devtoolsEnabled) {
           const toolbar = await resolveDevtools(
