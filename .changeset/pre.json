@@ -78,9 +78,11 @@
     "plugin-package-rename",
     "production-error-boundary",
     "protect-configured-entry-chunks",
+    "rc10-live-address-preview-passthrough-prebundle",
     "reject-prefixed-server-env-keys",
     "remove-client-manifest-virtual",
     "response-head-middleware-preview",
+    "ride-solid-rc-10",
     "ride-solid-rc-9",
     "root-relative-filter-globs",
     "sc-bootstrap-before-hydration-data",
@@ -98,6 +100,7 @@
     "server-functions-turnkey",
     "six-lions-joke",
     "solid-compiler-packages",
+    "source-names",
     "ssr-inline-solid-consumers",
     "start-css-filter",
     "start-env-typed",
@@ -116,6 +119,7 @@
     "vite8-scan-jsx-classic",
     "vitest-browser-mode-no-jsdom-default",
     "vitest-client-posture",
-    "vitest-server-posture-opt-out"
+    "vitest-server-posture-opt-out",
+    "webworker-async-hooks-warning"
   ]
 }
