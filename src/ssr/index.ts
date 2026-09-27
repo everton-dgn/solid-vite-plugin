@@ -1949,8 +1949,14 @@ export function startServe(
           server.middlewares.use((req, res, next) => {
             const url = new URL(req.url || '/', 'http://localhost');
             if (url.pathname.startsWith('/@')) return next();
-            const accept = req.headers.accept || '';
-            const pageRequest = req.method === 'GET' && accept.includes('text/html');
+            // Vite's own HTML-fallback test: a GET or HEAD accepting HTML by
+            // name, via `*/*`, or with no Accept (curl, monitors). Production
+            // renders all of these; anything narrower 404s in dev only.
+            const accept = req.headers.accept;
+            const pageRequest =
+              (req.method === 'GET' || req.method === 'HEAD') &&
+              url.pathname !== '/favicon.ico' &&
+              (!accept || accept.includes('text/html') || accept.includes('*/*'));
             // Production dispatches every request through the handler, so
             // dev must too or API routes and no-JS form POSTs served by
             // `start.middleware` are unreachable under `vite dev`. Without
