@@ -121,9 +121,9 @@ A [picomatch](https://github.com/micromatch/picomatch) pattern, or array of patt
 - Type: Boolean
 - Default: true
 
-This will inject `solid-js/dev` in place of `solid-js` in dev mode. Has no effect in prod.
-If set to false, it won't inject it in dev.
-This is useful for extra logs and debug.
+Resolve Solid's development builds under `vite dev` — the `development` export condition of
+`solid-js` and `@solidjs/web`, which carry the extra checks, warnings and diagnostics. Has no
+effect on `vite build`. Set to `false` to serve the production builds in dev instead.
 
 #### options.observe
 

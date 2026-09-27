@@ -171,6 +171,18 @@ const DEFAULT_RUNTIME = '@solidjs/web/server-functions';
 // equals it, no configure calls need to be emitted at all.
 const DEFAULT_ENDPOINT = '/_server';
 const STORAGE_SOURCE = '@solidjs/web/storage';
+
+/**
+ * The endpoint mount as the runtime is configured with it — the option (or
+ * the runtime's default) with its leading slash guaranteed, before Vite's
+ * `base` is applied. Shared with the start-mode plugin, whose preview
+ * middleware classifies responses by this mount.
+ * @internal
+ */
+export function normalizeServerFunctionsEndpoint(endpoint?: string): string {
+  const option = endpoint || DEFAULT_ENDPOINT;
+  return option.startsWith('/') ? option : '/' + option;
+}
 // Server-only handler: importing it wires the endpoint in one line
 // (registrations via the manifest, request-event scoping, endpoint config).
 const HANDLER_ID = 'virtual:solid-server-function-handler';
@@ -367,8 +379,7 @@ export function serverFunctions(
   const manifestId = options.manifest || DEFAULT_MANIFEST;
   const directive = options.directive || DEFAULT_DIRECTIVE;
   const runtime = options.runtime || { server: DEFAULT_RUNTIME, client: DEFAULT_RUNTIME };
-  const endpointOption = options.endpoint || DEFAULT_ENDPOINT;
-  const endpoint = endpointOption.startsWith('/') ? endpointOption : '/' + endpointOption;
+  const endpoint = normalizeServerFunctionsEndpoint(options.endpoint);
   const components = !!options.components;
   // The middleware only exists on the main plugin's path to begin with (see the
   // `internal` parameter doc); the public option opts out of it there.
@@ -597,11 +608,13 @@ export function serverFunctions(
         if (internal.externalDevServer || !isRunnableEnvironment(ssrEnvironment)) {
           return;
         }
-        // A call's address is `<endpoint>/<id>` — plain HTTP — or
-        // `<endpoint>/data/<id>` — the scripted transport's own path
-        // (solidjs/solid#3076, #3094). Bare-mount requests still reach the
-        // runtime handler (it answers 404), so misdirected posts fail
-        // through the endpoint rather than falling through to SSR.
+        // A call's address takes one of three shapes: `<endpoint>/<id>`
+        // (plain HTTP), `<endpoint>/data/<id>` (the scripted transport's own
+        // path, solidjs/solid#3076, #3094) or `<endpoint>/live/<id>` (a
+        // `live` loop's connection, answered as an event stream; @solidjs/web
+        // 2.0.0-rc.10). Bare-mount requests still reach the runtime handler
+        // (it answers 404), so misdirected posts fail through the endpoint
+        // rather than falling through to SSR.
         const underMount = (pathname: string, mount: string) =>
           pathname === mount || pathname.startsWith(mount + '/');
         server.middlewares.use((req, res, next) => {
@@ -623,13 +636,19 @@ export function serverFunctions(
             // code references are never loaded by the SSR render itself.
             // The id lives in the path segment after the mount — behind a
             // literal `data` segment on the scripted transport's address
-            // (solidjs/solid#3094). Segment count keeps the two apart: an id
-            // occupies exactly one segment, so `data/<id>` is only ever a
-            // data address, and a function id spelled `data` still parses at
-            // the bare one.
+            // (solidjs/solid#3094) or a literal `live` segment on a live
+            // loop's. Mirrors the runtime's `parseServerFunctionAddress`:
+            // one kind segment at most is stripped, and segment count keeps
+            // the shapes apart — an id occupies exactly one segment, so
+            // `data/<id>` / `live/<id>` are only ever kind-prefixed
+            // addresses, a function id spelled `data` or `live` still parses
+            // at the bare one, and `data/live/<id>` is a miss (the runtime
+            // 404s it too).
             const mount = basePrefixed ? resolvedEndpoint : endpoint;
             let segment = url.pathname.slice(mount.length + 1);
-            if (segment.startsWith('data/')) segment = segment.slice(5);
+            if (segment.startsWith('data/') || segment.startsWith('live/')) {
+              segment = segment.slice(5);
+            }
             let functionId: string | null = null;
             if (segment && !segment.includes('/')) {
               try {
