@@ -1089,6 +1089,9 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
   // `buildInputs`, which lists every route module). Null outside start mode.
   let startClientEntryId: string | null = null;
   let solidPkgsConfig: Awaited<ReturnType<typeof crawlFrameworkPkgs>>;
+  // Names of the packages `isSemiFrameworkPkgByJson` classified, so their
+  // dependencies can be taken back out of `optimizeDeps.include` (see below).
+  const semiFrameworkPkgs = new Set<string>();
   const tsrxCss = new Map<string, string>();
 
   // The client build's manifest, read back by SSR builds. In builder-mode
@@ -1279,11 +1282,34 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
           // would split it just the same), never vitest (it manages inlining
           // via test.server.deps).
           if (!(replaceDev || observe) || isTestMode) return false;
-          return SOLID_RUNTIME_PKGS.some(
+          const semi = SOLID_RUNTIME_PKGS.some(
             (name) => pkgJson.dependencies?.[name] || pkgJson.peerDependencies?.[name],
           );
+          if (semi && typeof pkgJson.name === 'string') semiFrameworkPkgs.add(pkgJson.name);
+          return semi;
         },
       });
+
+      // A semi-framework package is inlined for ONE reason: so it resolves the
+      // runtime through Vite and shares the app's copy. vitefu's crawl treats
+      // it like a framework package for its dependencies too — every CJS
+      // dependency is deep-included (`"pkg > dep"`) so the browser optimizer
+      // pre-bundles it. For a library that ships its build-time half in the
+      // same package (a Vite plugin, a compiler binding, a CLI) that pushes
+      // node-only modules into the client's pre-bundle: `@yak/solid` lists
+      // `@swc/core`, and rolldown then fails on its native `.node` binding
+      // before `vite dev` serves a page (#375). Nothing about sharing the
+      // runtime needs the package's dependencies pre-bundled, so any chain
+      // that runs through a semi-framework package is dropped; a browser-side
+      // CJS dependency of such a package is discovered and optimized on
+      // first use instead, as it was before the package was classified at
+      // all. Framework packages (a `solid` export condition) keep vitefu's
+      // full treatment — that is the long-standing contract for them.
+      if (semiFrameworkPkgs.size > 0) {
+        solidPkgsConfig.optimizeDeps.include = solidPkgsConfig.optimizeDeps.include.filter(
+          (entry) => !entry.split(' > ').some((name) => semiFrameworkPkgs.has(name)),
+        );
+      }
 
       // fix for bundling dev in production
       const nestedDeps = replaceDev ? ['solid-js', '@solidjs/web'] : [];
