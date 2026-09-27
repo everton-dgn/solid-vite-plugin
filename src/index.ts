@@ -39,7 +39,7 @@ export type {
 } from './server-functions/index.js';
 export type { StartOptions };
 import path from 'path';
-import type { FilterPattern, Plugin, ViteDevServer } from 'vite';
+import type { FilterPattern, Logger, Plugin, ViteDevServer } from 'vite';
 import {
   createFilter,
   defaultClientConditions,
@@ -1068,6 +1068,10 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
   let isBuild = false;
   let isSsrBuild = false;
   let base = '/';
+  let logger: Logger | null = null;
+  // Set in configResolved when a worker-targeted server build would carry
+  // the plugin's `@solidjs/web/storage` import; emitted once from buildStart.
+  let workerTargetWarning = false;
   let clientOutDir: string | null = null;
   // The client environment's resolved build options, for the configured
   // entry input. Read off the resolved config so the SSR half of a
@@ -1554,6 +1558,24 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
             "`components: 'external'` to acknowledge it and silence this warning.",
         );
       }
+      // The generated server code — the start-mode handler and the
+      // server-function handler module — imports `@solidjs/web/storage`,
+      // the one Solid module that needs `node:async_hooks`
+      // (AsyncLocalStorage keeps the request event live across `await`s;
+      // there is no sync-scope fallback, solidjs/solid#3597). A worker-
+      // targeted server build (`ssr.target: 'webworker'`, e.g. Shopify
+      // Oxygen's Vite plugin) only fails at deploy with a bare
+      // module-not-found, so name the requirement and the fix at build
+      // time instead. Detected here, emitted from the ssr environment's
+      // buildStart so it lands once per server build: the default builder
+      // resolves the config once per environment on top of its own pass,
+      // so a configResolved warning would print three times per build.
+      // Build-only — dev runs the ssr environment in Node.
+      workerTargetWarning =
+        isBuild &&
+        !!(startOptions || options.serverFunctions) &&
+        config.ssr?.target === 'webworker';
+      logger = config.logger;
       needHmr =
         config.command === 'serve' &&
         config.mode !== 'production' &&
@@ -1600,6 +1622,23 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
         }
         return origSend(...args);
       } as typeof hot.send;
+    },
+
+    buildStart() {
+      // `ssr.target` is a property of the `ssr` environment specifically
+      // (Vite reads it as `environment.name === 'ssr'` too), and that is the
+      // one environment whose bundle carries the storage import. Each
+      // environment gets its own plugin instance under the default builder,
+      // so this runs exactly once for the server build — and not at all for
+      // the client build or a `vite build --ssr`-less client-only build.
+      if (!workerTargetWarning || this.environment?.name !== 'ssr') return;
+      logger!.warn(
+        '[@solidjs/vite-plugin] The server build targets a worker runtime (ssr.target = "webworker"). ' +
+          "Solid's server runtime requires Node's async context (node:async_hooks / AsyncLocalStorage). " +
+          'On Cloudflare Workers and compatible runtimes (e.g. Shopify Oxygen) set a compatibility_date ' +
+          'of 2026-08-04 or later (nodejs_compat is on by default from that date), or enable the ' +
+          'nodejs_compat flag. See https://github.com/solidjs/solid/issues/3597',
+      );
     },
 
     async hotUpdate({ file, modules, read }) {
