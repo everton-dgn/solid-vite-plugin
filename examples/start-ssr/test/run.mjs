@@ -998,6 +998,56 @@ async function runDevMode() {
     record(mode, 'sf', 'dev middleware rejects unknown id', bogus.status === 404);
     await runCsrfChecks(mode, origin, functionId);
 
+    // ---- Live address, cold: `<endpoint>/live/<id>` (@solidjs/web rc.10) --
+    // A `live` loop connects at the third address shape, answered as an
+    // event stream. The function lives in a module nothing has loaded
+    // server-side yet — src/frames/data.tsx is the frames page's; App.tsx
+    // never imports it, and the bare cold dispatch above loaded api.ts only
+    // — so the middleware has to read the id out of the live shape and
+    // import the module itself. Read as a `data/`-only shape the id parsed
+    // to null, the import was skipped, and the runtime 404'd the call.
+    const liveModule = await (await fetch(origin + '/src/frames/data.tsx')).text();
+    const liveId = extractFunctionId(liveModule, 'incrementCounter');
+    const live = liveId
+      ? await fetch(`${origin}/_server/live/${encodeURIComponent(liveId)}`, { method: 'POST' })
+      : null;
+    // A live body would stay open on a source that keeps yielding; a plain
+    // value is one event and the end of the stream — bound the read so a
+    // regression into an open connection fails instead of hanging.
+    const liveBody = live
+      ? await Promise.race([
+          live.text(),
+          new Promise((resolve) => setTimeout(() => resolve(null), 10000)),
+        ])
+      : null;
+    record(
+      mode,
+      'sf',
+      'cold dispatch at the live address imports the module on demand (event stream)',
+      !!live &&
+        live.status === 200 &&
+        (live.headers.get('content-type') || '').startsWith('text/event-stream') &&
+        typeof liveBody === 'string' &&
+        /^data: /m.test(liveBody),
+      liveId
+        ? `status ${live.status}, content-type ${JSON.stringify(live.headers.get('content-type'))}, body ${JSON.stringify(liveBody)}`
+        : 'could not extract function id',
+    );
+    // The runtime's address grammar, mirrored: one kind segment at most, and
+    // an id is exactly one segment — the middleware must not import a module
+    // for these either (the runtime answers 404 in every case).
+    for (const miss of ['/_server/live/', '/_server/live/a/b', '/_server/data/live/' + liveId]) {
+      const res = await fetch(origin + miss, { method: 'POST' });
+      await res.text();
+      record(
+        mode,
+        'sf',
+        `live address grammar: ${miss} is a miss`,
+        res.status === 404,
+        `status ${res.status}`,
+      );
+    }
+
     const html = await runSsrChecks(mode, origin);
     record(mode, 'dev', 'Vite client injected into <head>', html.includes('/@vite/client'));
     // The patch script's own source references the selector; match it inside
@@ -3323,6 +3373,103 @@ async function runPreviewMode() {
     const bogus = await fetch(origin + '/_server/bogus-0', { method: 'POST' });
     record(mode, 'sf', 'preview dispatches /_server (unknown id rejected)', bogus.status === 404);
 
+    // ---- Streamed shapes pass preview's compression untouched -----------
+    // Preview's compression middleware sizes a response up on its first
+    // write and, at ≥1KiB, pipes the rest through zlib — which holds small
+    // writes until its buffer fills. A live event stream (@solidjs/web
+    // 2.0.0-rc.10, `<endpoint>/live/<id>`) stays open, so a held event is
+    // one never delivered; the plugin passes `text/event-stream` and
+    // everything under the server-function mount through as identity, like
+    // it already did for the streamed page. Answers big enough to trip the
+    // threshold, at both scripted shapes: without the exemption they come
+    // back gzip/br (fetch decodes transparently — the header is the tell).
+    // The registrations sit in the handler chunk — split out of server.js
+    // under `start.instrument` (this mode's env) — so scan the whole
+    // server build.
+    const serverDist = path.join(exampleDir, 'dist/server');
+    const serverAssetsDir = path.join(serverDist, 'assets');
+    const previewBundle = [
+      path.join(serverDist, 'server.js'),
+      ...(existsSync(serverAssetsDir)
+        ? readdirSync(serverAssetsDir)
+            .filter((f) => f.endsWith('.js'))
+            .map((f) => path.join(serverAssetsDir, f))
+        : []),
+    ]
+      .map((file) => readFileSync(file, 'utf-8'))
+      .join('\n');
+    const registeredId = (name) =>
+      previewBundle.match(new RegExp(`registerServerReference\\w*\\("(${name}-[^"]+)"`))?.[1] ??
+      null;
+    // `greet` answers an object (via respond(), status 201): a value the
+    // live address frames as an event. A string result has a natural HTTP
+    // body and takes the ordinary road even there, so `getServerMessage`
+    // is the data-address probe below, not this one.
+    const greetId = registeredId('greet');
+    const messageId = registeredId('getServerMessage');
+    const bigName = 'x'.repeat(2000);
+    const bigArgs = `?args=${encodeURIComponent(JSON.stringify([bigName]))}`;
+    const compressible = { method: 'POST', headers: { 'accept-encoding': 'gzip, br' } };
+    const notCompressed = (res) =>
+      !/\b(gzip|br|deflate)\b/.test(res.headers.get('content-encoding') || '');
+    const liveRes = greetId
+      ? await fetch(`${origin}/_server/live/${encodeURIComponent(greetId)}${bigArgs}`, compressible)
+      : null;
+    const liveText = liveRes
+      ? await Promise.race([
+          liveRes.text(),
+          new Promise((resolve) => setTimeout(() => resolve(null), 10000)),
+        ])
+      : null;
+    record(
+      mode,
+      'sf',
+      'live event stream passes preview compression as identity',
+      !!liveRes &&
+        liveRes.status === 201 &&
+        (liveRes.headers.get('content-type') || '').startsWith('text/event-stream') &&
+        notCompressed(liveRes) &&
+        typeof liveText === 'string' &&
+        /^data: /m.test(liveText) &&
+        liveText.includes(bigName),
+      greetId
+        ? `status ${liveRes.status}, content-type ${JSON.stringify(liveRes.headers.get('content-type'))}, content-encoding ${JSON.stringify(liveRes.headers.get('content-encoding'))}, body ${liveText === null ? 'timed out' : `${liveText.length} chars`}`
+        : 'could not find greet in the server bundle',
+    );
+    // The data address answers a string result as a plain body — a shape
+    // the content type alone would not exempt; the mount rule does.
+    const dataRes = messageId
+      ? await fetch(
+          `${origin}/_server/data/${encodeURIComponent(messageId)}${bigArgs}`,
+          compressible,
+        )
+      : null;
+    const dataText = dataRes ? await dataRes.text() : '';
+    record(
+      mode,
+      'sf',
+      'server-function endpoint answers pass preview compression as identity',
+      !!dataRes && dataRes.status === 200 && notCompressed(dataRes) && dataText.includes(bigName),
+      dataRes
+        ? `status ${dataRes.status}, content-type ${JSON.stringify(dataRes.headers.get('content-type'))}, content-encoding ${JSON.stringify(dataRes.headers.get('content-encoding'))}`
+        : 'could not find getServerMessage in the server bundle',
+    );
+    // Static assets keep compressing — the exemption is scoped to the
+    // streamed shapes, not a preview-wide switch.
+    if (entryMatch) {
+      const compressedAsset = await fetch(origin + entryMatch[1], {
+        headers: { 'accept-encoding': 'gzip, br' },
+      });
+      await compressedAsset.arrayBuffer();
+      record(
+        mode,
+        'static',
+        'hashed client asset still compressed under preview',
+        /\b(gzip|br)\b/.test(compressedAsset.headers.get('content-encoding') || ''),
+        `content-encoding ${JSON.stringify(compressedAsset.headers.get('content-encoding'))}`,
+      );
+    }
+
     // Middleware fronts preview exactly like dev and prod.
     record(
       mode,
@@ -4270,7 +4417,7 @@ async function runObserveMode() {
   record(
     mode,
     'client',
-    'client components compile with their source labels (componentNames)',
+    'client components compile with their source labels (sourceNames)',
     clientLabels.has('HmrTarget') && clientLabels.size >= 5,
     `labels: ${[...clientLabels].join(', ') || 'none'}`,
   );
@@ -4303,7 +4450,7 @@ async function runObserveMode() {
     ssrLabelsExpected ? serverLabels.has('HmrTarget') : true,
     ssrLabelsExpected
       ? `labels: ${[...serverLabels].join(', ') || 'none'}`
-      : `not asserted: @solidjs/compiler ${compiler.version} predates SSR componentNames`,
+      : `not asserted: @solidjs/compiler ${compiler.version} predates SSR sourceNames`,
   );
   const webObserveExpected = web.rc >= 9;
   record(

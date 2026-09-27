@@ -32,7 +32,7 @@ import solidPlugin from '@solidjs/vite-plugin';
 //   graph loads — the APM/OpenTelemetry seam; middleware.ts reports what it
 //   saw at its own load in an `x-instrument` header.
 // - SOLID_OBSERVE=1 (observe mode) turns on `observe`: the `observe` export
-//   condition everywhere and the compiler's `componentNames` for both
+//   condition everywhere and the compiler's `sourceNames` for both
 //   postures, so the built server AND client bundles carry component labels.
 // - SSR_RENDER_MODE sets `start.renderMode` (render-mode mode): `module`
 //   wires src/render-mode.ts (the per-request policy: header / crawler UA /

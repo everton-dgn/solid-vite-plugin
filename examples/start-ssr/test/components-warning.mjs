@@ -112,6 +112,31 @@ async function resolveWith(solidOptions) {
     componentsWarnings.length === 0 &&
       !config.optimizeDeps.include.includes('@solidjs/web/frames'),
   );
+  // Independent of server components: the attribution engine and the
+  // performance-tracks recorder are pre-bundled in the first optimizer pass
+  // under `serve`, so a consumer the scanner never crawls (a linked package,
+  // a `solid`-condition package vitefu excluded) importing one mid-session
+  // can't re-optimize a second @solidjs/signals core into the page.
+  record(
+    'serve: solid-js/attribution and @solidjs/web/performance-tracks pre-bundled',
+    config.optimizeDeps.include.includes('solid-js/attribution') &&
+      config.optimizeDeps.include.includes('@solidjs/web/performance-tracks'),
+    config.optimizeDeps.include.join(', '),
+  );
+}
+
+// ---- build: optimizeDeps is serve-only, the entries stay out --------------
+{
+  const config = await resolveConfig(
+    { root: exampleDir, configFile: false, plugins: [solidPlugin({ ssr: true })] },
+    'build',
+  );
+  record(
+    'build: attribution / performance-tracks not in optimizeDeps.include',
+    !config.optimizeDeps.include.includes('solid-js/attribution') &&
+      !config.optimizeDeps.include.includes('@solidjs/web/performance-tracks'),
+    config.optimizeDeps.include.join(', '),
+  );
 }
 
 // ---- full SSR start mode: `'external'` is redundant but harmless ---------

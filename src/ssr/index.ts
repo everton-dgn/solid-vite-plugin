@@ -622,6 +622,12 @@ export function startServe(
   options: StartOptions,
   internal: {
     serverFunctions?: boolean;
+    /**
+     * The server-function endpoint as the runtime is configured with it
+     * (leading slash, no `base`); present when `serverFunctions` is on.
+     * The preview middleware exempts everything under it from compression.
+     */
+    serverFunctionsEndpoint?: string;
     serverComponents?: boolean;
     ssr?: boolean;
     styleFilter?: DevStyleFilter;
@@ -1314,10 +1320,11 @@ export function startServe(
     lines.push(``, `async function dispatchRequest(request, event, options) {`);
     if (composeServerFunctions) {
       lines.push(
-        // A call's address is `<endpoint>/<id>` or `<endpoint>/data/<id>`
-        // (solidjs/solid#3076, #3094); the prefix gate covers both, and the
-        // bare mount still routes so a misaddressed request 404s through the
-        // runtime handler instead of rendering a page at it.
+        // A call's address is `<endpoint>/<id>`, `<endpoint>/data/<id>` or
+        // `<endpoint>/live/<id>` (solidjs/solid#3076, #3094; the live shape
+        // since @solidjs/web 2.0.0-rc.10); the prefix gate covers all three,
+        // and the bare mount still routes so a misaddressed request 404s
+        // through the runtime handler instead of rendering a page at it.
         `  const requestPath = new URL(request.url).pathname;`,
         `  if (requestPath === endpoint || requestPath.startsWith(endpoint + '/')) {`,
         // The call shares the middleware chain's event (locals decoration,
@@ -1812,6 +1819,14 @@ export function startServe(
         // only the server-function endpoint needs the handler, and without
         // server functions there is no dist/server at all.
         if (externalServer || (clientMode && !internal.serverFunctions)) return;
+        // The server-function mount as the built handler sees it (base
+        // applied, like every pathname it compares against).
+        const serverFunctionsMount = internal.serverFunctionsEndpoint
+          ? joinBase(base, internal.serverFunctionsEndpoint)
+          : null;
+        const underServerFunctionsMount = (pathname: string) =>
+          serverFunctionsMount !== null &&
+          (pathname === serverFunctionsMount || pathname.startsWith(serverFunctionsMount + '/'));
         return () => {
           let handlerPromise: Promise<{
             handleRequest: (
@@ -1831,16 +1846,41 @@ export function startServe(
               // server-function endpoint) and hands the URL to application
               // code, so restore the base — the deployed production handler
               // receives base-prefixed URLs and preview must match it.
+              const requestUrl = joinBase(base, req.url || '/');
               const response = await handler.handleRequest(
-                webRequestFromNode(req, joinBase(base, req.url || '/'), res),
+                webRequestFromNode(req, requestUrl, res),
                 // Same event extension the dev middleware and a production
                 // Node entry pass: the raw Node request as `nativeEvent`.
                 { event: { nativeEvent: req } },
               );
-              // Preview's compression middleware buffers whole responses;
-              // opting HTML out keeps SSR streaming observable, matching
-              // production behavior.
-              if ((response.headers.get('content-type') || '').includes('text/html')) {
+              // Preview's compression middleware (@polka/compression) sizes
+              // a response up on its first write and, past the threshold,
+              // pipes the rest through a zlib stream that holds small writes
+              // until its buffer fills — a streamed response arrives in
+              // bursts, or not at all while a connection stays open. The
+              // deployed handler streams as it renders, and preview exists
+              // to show that artifact, so the streamed shapes opt out
+              // (`content-encoding: identity` is the middleware's own
+              // pass-through signal):
+              // - `text/html`: page renders stream the shell ahead of async
+              //   content;
+              // - `text/event-stream`: server-sent events wherever the app
+              //   emits them (a `live` server function, a middleware route)
+              //   — an SSE connection stays open, so a held event is an
+              //   event never delivered;
+              // - everything under the server-function mount: the runtime
+              //   answers there in its own wire — the streaming codec
+              //   (`text/plain`, too generic to key on), the live event
+              //   stream, JSON — and every shape is either streamed or too
+              //   small for compression to buy anything in preview. Keying
+              //   on the mount also keeps a new answer shape from silently
+              //   regressing to buffered.
+              const contentType = response.headers.get('content-type') || '';
+              if (
+                contentType.includes('text/html') ||
+                contentType.includes('text/event-stream') ||
+                underServerFunctionsMount(new URL(requestUrl, 'http://localhost').pathname)
+              ) {
                 res.setHeader('content-encoding', 'identity');
               }
               await sendWebResponse(res, response);

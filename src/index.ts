@@ -15,7 +15,11 @@ import {
 import { boundaryModules } from './boundary-modules.js';
 import { solidDiagnostics } from './diagnostics/index.js';
 
-import { serverFunctions, type ServerFunctionsOptions } from './server-functions/index.js';
+import {
+  normalizeServerFunctionsEndpoint,
+  serverFunctions,
+  type ServerFunctionsOptions,
+} from './server-functions/index.js';
 import { SSR_HANDLER_ID, startServe, type StartOptions } from './ssr/index.js';
 import { startEnv } from './start-env.js';
 import {
@@ -258,9 +262,10 @@ export interface Options {
    */
   exclude?: FilterPattern;
   /**
-   * This will inject solid-js/dev in place of solid-js in dev mode. Has no
-   * effect in prod. If set to `false`, it won't inject it in dev. This is
-   * useful for extra logs and debugging.
+   * Resolve Solid's development builds under `vite dev` — the `development`
+   * export condition of `solid-js` and `@solidjs/web`, which carry the extra
+   * checks, warnings and diagnostics. Has no effect on `vite build`. Set to
+   * `false` to serve the production builds in dev instead.
    *
    * @default true
    */
@@ -1378,6 +1383,19 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
             ...(command === 'serve' && serverComponents
               ? ['@solidjs/web/frames', '@solidjs/web/server-functions']
               : []),
+            // The attribution engine and the Chrome performance-tracks
+            // recorder are subpaths the scanner only sees when the app's own
+            // graph imports them; a consumer it never crawls (a linked
+            // package, a `solid`-condition package vitefu excluded from the
+            // scan) importing one mid-session would discover it late →
+            // re-optimize → a second `@solidjs/signals` core beside the one
+            // `solid-js` was bundled with. Pre-bundle both in the first pass
+            // so they share that core. Both subpaths exist for every version
+            // in the peer range (^2.0.0-rc.10: `solid-js/attribution` since
+            // rc.8, `@solidjs/web/performance-tracks` since rc.10).
+            ...(command === 'serve'
+              ? ['solid-js/attribution', '@solidjs/web/performance-tracks']
+              : []),
             ...solidPkgsConfig.optimizeDeps.include,
           ],
           exclude: solidPkgsConfig.optimizeDeps.exclude,
@@ -2156,6 +2174,16 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
       ...startEnv(startOptions.env),
       ...startServe(startOptions, {
         serverFunctions: !!options.serverFunctions,
+        // The mount the runtime is configured with (before `base`; the
+        // start plugin applies it): the preview middleware passes every
+        // response under it through uncompressed.
+        ...(options.serverFunctions
+          ? {
+              serverFunctionsEndpoint: normalizeServerFunctionsEndpoint(
+                options.serverFunctions === true ? undefined : options.serverFunctions.endpoint,
+              ),
+            }
+          : {}),
         serverComponents,
         ssr: !!options.ssr,
         styleFilter: filterDevStyles,
