@@ -137,6 +137,43 @@ and turns on the compiler's source names (see `options.solid.sourceNames`), so g
 (`<Home>`, `span.textContent`, `count`) survive minification. Under `vite dev` the dev build
 still wins.
 
+#### options.performanceTracks
+
+- Type: `boolean | PerformanceTracksOptions` (from `@solidjs/web/performance-tracks`)
+- Default: true
+
+Dev-serve only: paint Solid's records — effect and memo re-runs, interactions, holds, async
+flights, navigations, server-function calls — as custom tracks in the Chrome Performance
+panel, without the app calling `enablePerformanceTracks()` itself. Record a trace with the
+Performance panel while the dev server serves the page; the `Solid` group appears beside
+Chrome's main-thread and network tracks (`Interactions`, `Propagation`, `Effects`, `Memos`,
+`Async`, `Holds`, `Navigations`, `Server`), every span labelled by *why* it ran, findings as
+markers on the Timings track. See [Chrome Performance panel](https://github.com/solidjs/solid/blob/next/documentation/solid-2.0/08-dev-diagnostics.md#chrome-performance-panel-solidjswebperformance-tracks)
+in the Solid 2.0 diagnostics guide for how to read them.
+
+The plugin injects a small client module that enables the tracks *ahead of the app's entry*
+— a `<script type="module">` prepended to `<head>` for `index.html` apps, the first import
+of the client entry (generated or authored) in start mode — so hydration and the first
+interaction are on the timeline. The dev server needs nothing: it already writes its side
+of the work (`Server-Timing`: `solid-shell`, `solid-boundary`, `solid-invocation`), which the
+tracks read back onto the `Server` track.
+
+| Value | `vite dev` | `vite build` / preview / vitest |
+| --- | --- | --- |
+| omitted or `true` | enabled, adapter defaults | off |
+| `{ minMs, rich, attribution }` | enabled with those options | off |
+| `false` | off | off |
+
+The object form passes `PerformanceTracksOptions` through — `minMs` (floor for run spans),
+`rich` (`performance.measure` with tooltips and properties vs `console.timeStamp`), and
+`attribution` (the options of the engine hold the adapter takes: thresholds and the `values`
+level). All plain data: the options are serialized into the injected module. Never active on
+`vite build` — not for `dev: true` or `observe` builds; an observe app that wants tracks in
+production calls `enablePerformanceTracks()` itself — and never in test mode or preview.
+With `dev: false` (and no `observe`) the production runtime is served under `vite dev` and
+the adapter is a no-op. Requires the installed `@solidjs/web` to export `./performance-tracks` (every version
+in the peer range does); an older install warns once at startup and skips the injection.
+
 #### options.hot
 
 - Type: Boolean
@@ -236,7 +273,9 @@ With `ssr: true` — **SSR start mode**:
 - **Dev**: `vite` just works — a middleware on the dev server streams the
   rendered app for HTML-accepting GET requests through the SSR environment,
   injecting the Vite client (HMR, error overlay) and the dev style patch
-  into `<head>`. SSR errors render Vite's error page with the overlay.
+  into `<head>`. SSR errors render Vite's error page with the overlay. The
+  client entry enables the Chrome Performance panel tracks before it
+  hydrates (see [`performanceTracks`](#optionsperformancetracks)).
 - **Build**: a plain `vite build` produces both bundles via the
   environments/builder API — client assets (+ manifest) to `dist/client` and
   the server bundle to `dist/server/server.js`. (`vite build --app`, or the

@@ -130,10 +130,18 @@
 //     everything else through handleRequest with `nativeEvent`, PORT/HOST,
 //     the `listener` export mountable — while server.js stays byte-identical
 //     and nothing is emitted without the option (see runNodeMode).
+//   - `performanceTracks` (on by default): under dev serve the generated and
+//     authored client entries import the plugin's virtual module ahead of
+//     everything else, the served module calls enablePerformanceTracks(),
+//     and a first interaction in the browser lands on Solid's tracks
+//     (measure entries with `detail.devtools.track`); the perf-tracks mode
+//     (SOLID_PERF_TRACKS / SOLID_DEV_BUILD) covers `false`, the options
+//     form, test mode, an index.html app's head script, and a `dev: true`
+//     build; prod and observe builds assert no injection.
 //
 // Requires the plugin built (pnpm build at the repo root) and Google Chrome.
 // Usage: node test/run.mjs
-// [dev|prod|document|css-filter|entries|endpoint|configure|no-middleware|middleware|preview|render-mode|base|builder-order|builder-prepare|extra-input|babel-hmr|frames|external|detect|vitest|node]
+// [dev|prod|document|css-filter|entries|endpoint|configure|no-middleware|middleware|preview|render-mode|base|builder-order|builder-prepare|extra-input|babel-hmr|frames|external|observe|perf-tracks|detect|vitest|node]
 // (default: all)
 
 import { spawn, execSync, execFileSync } from 'node:child_process';
@@ -180,6 +188,30 @@ const CHROME =
 const CDP_PORT = 9337;
 
 const SECRET = 'SERVER-ONLY-SECRET';
+
+// The plugin's Chrome Performance panel injection (`performanceTracks`): the
+// virtual module the client entry imports under dev serve, and the track
+// names `@solidjs/web/performance-tracks` paints under the `Solid` group
+// (the adapter's TRACKS table; a measure entry's `detail.devtools.track`).
+const PERF_TRACKS_ID = 'virtual:solid-performance-tracks';
+const SOLID_TRACKS = [
+  'Interactions',
+  'Propagation',
+  'Effects',
+  'Memos',
+  'Async',
+  'Holds',
+  'Navigations',
+  'Server',
+];
+// Build-output markers for the adapter itself: the Performance panel
+// extensibility payload's literals (`dataType: "track-entry"`, the
+// `trackGroup` key), which survive minification where identifiers don't.
+// Present in the dev and observe adapters; a build that never injected the
+// module carries neither.
+const PERF_TRACKS_BUILD_MARKERS = ['track-entry', 'trackGroup', PERF_TRACKS_ID];
+const perfTracksMarkersIn = (source) =>
+  PERF_TRACKS_BUILD_MARKERS.some((marker) => source.includes(marker));
 
 // Server-function round-trips driven from the hydrated page.
 const CALLS = [
@@ -738,7 +770,7 @@ async function runHmrChecks(mode, cdp, origin, { expectCompiler } = {}) {
 async function runBrowserChecks(
   mode,
   origin,
-  { hmr, devCss, expectCompiler, devtools, ssrError } = {},
+  { hmr, devCss, expectCompiler, devtools, perfTracks, ssrError } = {},
 ) {
   const chrome = startProcess(CHROME, [
     '--headless=new',
@@ -764,6 +796,23 @@ async function runBrowserChecks(
       hydrationErrs.join(' | '),
     );
 
+    if (perfTracks) {
+      // Observe the User Timing entries the tracks adapter emits from here
+      // on: rich mode (the dev default) paints every span as a
+      // `performance.measure` with `detail.devtools`, and clears its own
+      // entries in batches — an observer sees each entry once regardless,
+      // where the buffer might have been cleared by the time it is read.
+      await cdp.evalJs(`
+        window.__solidTracks = new Set();
+        new PerformanceObserver((list) => {
+          for (const entry of list.getEntries()) {
+            const devtools = entry.detail?.devtools;
+            if (devtools?.trackGroup === 'Solid') window.__solidTracks.add(devtools.track);
+          }
+        }).observe({ entryTypes: ['measure'] });
+      `);
+    }
+
     await cdp.evalJs('document.querySelector("#increment").click()');
     await cdp.evalJs('document.querySelector("#increment").click()');
     record(
@@ -772,6 +821,29 @@ async function runBrowserChecks(
       'hydrated app is interactive (counter)',
       await cdp.waitFor('document.querySelector("#count")?.textContent === "2"'),
     );
+
+    if (perfTracks) {
+      // The click is an interaction the engine records and the adapter
+      // paints: an `Interactions` span for the click itself, the drain on
+      // `Propagation`, the count's text effect on `Effects`. Any of Solid's
+      // track names on a measure entry proves the tracks were enabled before
+      // the interaction — by the injected module, since the app never calls
+      // enablePerformanceTracks() itself.
+      const tracked = `[...window.__solidTracks, ...performance.getEntriesByType('measure')
+        .map((e) => e.detail?.devtools?.trackGroup === 'Solid' ? e.detail.devtools.track : null)
+        .filter(Boolean)]`;
+      await cdp.waitFor(
+        `${tracked}.some((track) => ${JSON.stringify(SOLID_TRACKS)}.includes(track))`,
+      );
+      const seen = await cdp.evalJs(`[...new Set(${tracked})]`);
+      record(
+        mode,
+        'perf-tracks',
+        'first interaction painted on the Solid performance tracks (measure entries with detail.devtools.track)',
+        Array.isArray(seen) && seen.some((track) => SOLID_TRACKS.includes(track)),
+        `tracks seen: ${JSON.stringify(seen)}`,
+      );
+    }
 
     for (const call of CALLS) {
       await cdp.evalJs(`document.querySelector(${JSON.stringify(call.button)}).click()`);
@@ -1108,6 +1180,50 @@ async function runDevMode() {
         /@solidjs(?:\/|_)start-devtools/.test(generatedEntry),
     );
 
+    // Performance tracks default-on (`performanceTracks` omitted): the
+    // generated entry imports the plugin's virtual module as its FIRST
+    // source import — ahead of the toolbar and the app, and so evaluated
+    // before the hydrate() call (the JSX compiler's own helper import of
+    // the runtime is hoisted above everything; evaluating the runtime
+    // module renders nothing) — and the module calls
+    // enablePerformanceTracks with the adapter's defaults, importing the
+    // adapter through the optimizer (pre-bundled in the first pass; a late
+    // discovery would re-optimize and bring a second signals core).
+    {
+      const tracksAt = generatedEntry.indexOf(PERF_TRACKS_ID);
+      const toolbarAt = generatedEntry.search(/@solidjs(?:\/|_)start-devtools/);
+      const appAt = generatedEntry.indexOf('/src/App.tsx');
+      const hydrateAt = generatedEntry.indexOf('hydrate(');
+      record(
+        mode,
+        'perf-tracks',
+        'generated client entry imports the performance-tracks module ahead of the toolbar, the app and hydrate()',
+        tracksAt !== -1 &&
+          toolbarAt !== -1 &&
+          appAt !== -1 &&
+          hydrateAt !== -1 &&
+          tracksAt < toolbarAt &&
+          tracksAt < appAt &&
+          tracksAt < hydrateAt,
+        `tracks@${tracksAt} toolbar@${toolbarAt} app@${appAt} hydrate@${hydrateAt}`,
+      );
+      const tracksModule = await (await fetch(origin + '/@id/' + PERF_TRACKS_ID)).text();
+      record(
+        mode,
+        'perf-tracks',
+        'served performance-tracks module enables the tracks with the defaults',
+        /enablePerformanceTracks\(\{\}\)/.test(tracksModule),
+        tracksModule.slice(0, 300),
+      );
+      record(
+        mode,
+        'perf-tracks',
+        'performance-tracks module imports the pre-bundled adapter',
+        /\.vite\/deps\/@solidjs_web_performance-tracks\.js/.test(tracksModule),
+        tracksModule.slice(0, 300),
+      );
+    }
+
     await runHttpChecks(mode, origin);
 
     const boom = await fetchStreamed(origin + '/boom');
@@ -1126,6 +1242,7 @@ async function runDevMode() {
       devCss: true,
       expectCompiler: 'native',
       devtools: true,
+      perfTracks: true,
       ssrError: true,
     });
 
@@ -1355,6 +1472,25 @@ async function runProdMode() {
     'dce',
     'no devtools wiring in server bundle',
     !serverBundle.includes('start-devtools') && !serverBundle.includes('virtual:solid-devtools'),
+  );
+  // Dev-serve-only guarantee for `performanceTracks` (on by default): a
+  // build never emits the injection — neither the virtual module id nor the
+  // adapter's payload literals reach either bundle.
+  const tracksLeaks = readdirSync(assetsDir).filter((f) =>
+    perfTracksMarkersIn(readFileSync(path.join(assetsDir, f), 'utf-8')),
+  );
+  record(
+    mode,
+    'perf-tracks',
+    'no performance-tracks injection in client assets',
+    tracksLeaks.length === 0,
+    tracksLeaks.join(', '),
+  );
+  record(
+    mode,
+    'perf-tracks',
+    'no performance-tracks injection in server bundle',
+    !perfTracksMarkersIn(serverBundle),
   );
 
   const server = startProcess('node', ['server.js'], {
@@ -1699,6 +1835,26 @@ async function runEntriesMode() {
       html.includes('src="/src/entry-client.tsx"') &&
         !html.includes('virtual:solid-ssr-entry-client'),
     );
+    // The authored entry gets the same dev-serve injection as the generated
+    // one: the performance-tracks import prepended ahead of its own source
+    // imports (the shell module) and its hydrate() call.
+    {
+      const authoredEntry = await (await fetch(origin + '/src/entry-client.tsx')).text();
+      const tracksAt = authoredEntry.indexOf(PERF_TRACKS_ID);
+      const shellAt = authoredEntry.indexOf('/src/TestShell.tsx');
+      const hydrateAt = authoredEntry.indexOf('hydrate(');
+      record(
+        mode,
+        'perf-tracks',
+        'authored client entry is served with the performance-tracks import ahead of its own',
+        tracksAt !== -1 &&
+          shellAt !== -1 &&
+          hydrateAt !== -1 &&
+          tracksAt < shellAt &&
+          tracksAt < hydrateAt,
+        `tracks@${tracksAt} shell@${shellAt} hydrate@${hydrateAt}`,
+      );
+    }
     await runCustomEntryDevtoolsChecks(mode, origin);
     try {
       process.kill(-server.pid, 'SIGTERM');
@@ -4409,6 +4565,19 @@ async function runObserveMode() {
     clientFiles.some((f) => f.startsWith('web.observe-')) && /web\.observe-/.test(entry),
     clientFiles.join(', '),
   );
+  // `performanceTracks` is a dev-server feature by decision: an observe
+  // build — the tier whose adapter DOES paint in production — still gets no
+  // injection (the app enables its own tracks there).
+  const observeTracksLeaks = clientFiles.filter((f) =>
+    perfTracksMarkersIn(readFileSync(path.join(clientDir, f), 'utf-8')),
+  );
+  record(
+    mode,
+    'perf-tracks',
+    'observe build carries no performance-tracks injection',
+    observeTracksLeaks.length === 0,
+    observeTracksLeaks.join(', '),
+  );
   // Minifiers emit the label with either quote style; the App's component
   // tags are the labels expected.
   const labelsIn = (code) =>
@@ -4462,6 +4631,206 @@ async function runObserveMode() {
       ? 'expected @solidjs/web/dist/server.observe.js in the bundle'
       : `not asserted: @solidjs/web ${web.version} has no server observe build`,
   );
+}
+
+// `performanceTracks` beyond the default the dev mode asserts: the opt-out
+// and the options form on start-mode entries (in-process dev servers,
+// SOLID_PERF_TRACKS), test mode's exclusion, a `dev: true` build
+// (SOLID_DEV_BUILD — the development runtime built for production, which
+// must still carry no injection), and the plain-app path: an index.html app
+// (no start mode) gets the module as a head-prepended script, before its own
+// entry script, and `false` gets nothing.
+async function runPerfTracksMode() {
+  const mode = 'perf-tracks';
+  console.log(`\n=== ${mode.toUpperCase()} ===`);
+  const ENTRY = 'virtual:solid-ssr-entry-client.tsx';
+  // The plugin container's load hook, not transformRequest: the raw codegen
+  // is what is under test, and a client transform of the entry kicks off
+  // the dep optimizer, whose in-flight run keeps `server.close()` from
+  // settling in this in-process shape.
+  const loadCode = async (server, id) => {
+    const loaded = await server.environments.client.pluginContainer.load(id);
+    return (typeof loaded === 'string' ? loaded : loaded?.code) || '';
+  };
+  const entryCode = (server) => loadCode(server, ENTRY);
+
+  let server;
+  try {
+    // ---- performanceTracks: false — no import, no module -----------------
+    process.env.SOLID_PERF_TRACKS = '0';
+    server = await createServer({ root: exampleDir, server: { middlewareMode: true } });
+    const offEntry = await entryCode(server);
+    record(
+      mode,
+      'off',
+      'performanceTracks: false leaves the generated client entry without the import',
+      offEntry.length > 0 && !offEntry.includes(PERF_TRACKS_ID),
+    );
+    const offResolved =
+      await server.environments.client.pluginContainer.resolveId(PERF_TRACKS_ID);
+    record(
+      mode,
+      'off',
+      'performanceTracks: false serves no performance-tracks module',
+      offResolved === null,
+      `resolved to ${JSON.stringify(offResolved)} although the option is off`,
+    );
+    await server.close();
+    server = undefined;
+
+    // ---- object form — options serialized into the enable call -----------
+    process.env.SOLID_PERF_TRACKS = JSON.stringify({ minMs: 2, rich: false });
+    server = await createServer({ root: exampleDir, server: { middlewareMode: true } });
+    const onEntry = await entryCode(server);
+    record(
+      mode,
+      'options',
+      'object form keeps the import in the generated client entry',
+      onEntry.includes(PERF_TRACKS_ID),
+    );
+    const tracksModule = await loadCode(server, PERF_TRACKS_ID);
+    record(
+      mode,
+      'options',
+      'object form serializes the options into enablePerformanceTracks()',
+      tracksModule.includes(`from '@solidjs/web/performance-tracks'`) &&
+        tracksModule.includes('enablePerformanceTracks({"minMs":2,"rich":false})'),
+      tracksModule.slice(0, 300),
+    );
+    await server.close();
+    server = undefined;
+    delete process.env.SOLID_PERF_TRACKS;
+
+    // ---- test mode — vitest runs a dev serve; no injection there ---------
+    server = await createServer({
+      root: exampleDir,
+      mode: 'test',
+      server: { middlewareMode: true },
+    });
+    const testEntry = await entryCode(server);
+    record(
+      mode,
+      'test-mode',
+      'mode "test" leaves the generated client entry without the import',
+      testEntry.length > 0 && !testEntry.includes(PERF_TRACKS_ID),
+    );
+    await server.close();
+    server = undefined;
+
+    // ---- plain app (index.html, no start mode) ---------------------------
+    // Written inside the example so the plugin finds the app's @solidjs/web
+    // walking up from the root, as it would in a real project.
+    const plainRoot = path.join(exampleDir, '.perf-tracks-plain-app');
+    const plainHtml = [
+      '<!doctype html>',
+      '<html><head><meta charset="utf-8" /></head>',
+      '<body><div id="app"></div><script type="module" src="/src/main.tsx"></script></body>',
+      '</html>',
+    ].join('\n');
+    try {
+      rmSync(plainRoot, { recursive: true, force: true });
+      mkdirSync(path.join(plainRoot, 'src'), { recursive: true });
+      writeFileSync(path.join(plainRoot, 'index.html'), plainHtml);
+      writeFileSync(
+        path.join(plainRoot, 'src/main.tsx'),
+        [
+          `import { render } from '@solidjs/web';`,
+          `render(() => <p>plain</p>, document.getElementById('app'));`,
+          ``,
+        ].join('\n'),
+      );
+      const { default: solidPlugin } = await import('@solidjs/vite-plugin');
+      const plainServer = async (options) =>
+        createServer({
+          root: plainRoot,
+          configFile: false,
+          plugins: [solidPlugin(options)],
+          server: { middlewareMode: true },
+        });
+
+      server = await plainServer({});
+      const html = await server.transformIndexHtml('/index.html', plainHtml);
+      const scriptAt = html.indexOf(`/@id/${PERF_TRACKS_ID}`);
+      const headEnd = html.indexOf('</head>');
+      const appAt = html.indexOf('/src/main.tsx');
+      record(
+        mode,
+        'plain',
+        'index.html app gets the performance-tracks module script in <head>, ahead of its entry',
+        scriptAt !== -1 && scriptAt < headEnd && scriptAt < appAt,
+        `script@${scriptAt} </head>@${headEnd} entry@${appAt}`,
+      );
+      record(
+        mode,
+        'plain',
+        'the injected script is a module script (deferred, document order)',
+        html.includes(`<script type="module" src="/@id/${PERF_TRACKS_ID}"`),
+      );
+      const plainModule = await loadCode(server, PERF_TRACKS_ID);
+      record(
+        mode,
+        'plain',
+        'index.html app: the module enables the tracks',
+        /enablePerformanceTracks\(\{\}\)/.test(plainModule),
+        plainModule.slice(0, 300),
+      );
+      await server.close();
+      server = undefined;
+
+      server = await plainServer({ performanceTracks: false });
+      const offHtml = await server.transformIndexHtml('/index.html', plainHtml);
+      record(
+        mode,
+        'plain',
+        'performanceTracks: false injects nothing into index.html',
+        !offHtml.includes(PERF_TRACKS_ID),
+      );
+      await server.close();
+      server = undefined;
+    } finally {
+      rmSync(plainRoot, { recursive: true, force: true });
+    }
+
+    // ---- dev: true build — the development runtime, still no injection ---
+    console.log('  building (dev: true)…');
+    execSync('pnpm run build', {
+      cwd: exampleDir,
+      stdio: 'pipe',
+      env: { ...process.env, NODE_ENV: 'production', SOLID_DEV_BUILD: '1' },
+    });
+    const assetsDir = path.join(exampleDir, 'dist/client/assets');
+    const clientFiles = readdirSync(assetsDir).filter((f) => f.endsWith('.js'));
+    record(
+      mode,
+      'dev-build',
+      'dev: true build resolves the development artifact of @solidjs/web',
+      clientFiles.some((f) => f.startsWith('web.dev-')),
+      clientFiles.join(', '),
+    );
+    const devBuildLeaks = clientFiles.filter((f) =>
+      perfTracksMarkersIn(readFileSync(path.join(assetsDir, f), 'utf-8')),
+    );
+    record(
+      mode,
+      'dev-build',
+      'dev: true build carries no performance-tracks injection',
+      devBuildLeaks.length === 0,
+      devBuildLeaks.join(', '),
+    );
+  } catch (e) {
+    record(mode, 'run', 'mode completed', false, String(e));
+  } finally {
+    await server?.close();
+    delete process.env.SOLID_PERF_TRACKS;
+    // Leave dist in the plain production state for anyone poking at it.
+    try {
+      execSync('pnpm run build', {
+        cwd: exampleDir,
+        stdio: 'pipe',
+        env: { ...process.env, NODE_ENV: 'production' },
+      });
+    } catch {}
+  }
 }
 
 async function runExternalMode() {
@@ -5463,6 +5832,7 @@ const ALL_MODES = [
   'babel-hmr',
   'external',
   'observe',
+  'perf-tracks',
   'detect',
   'vitest',
   'node',
@@ -5489,6 +5859,7 @@ for (const mode of modes) {
   else if (mode === 'babel-hmr') await runBabelHmrMode();
   else if (mode === 'external') await runExternalMode();
   else if (mode === 'observe') await runObserveMode();
+  else if (mode === 'perf-tracks') await runPerfTracksMode();
   else if (mode === 'vitest') await runVitestMode();
   else if (mode === 'node') await runNodeMode();
   else await runDetectMode();

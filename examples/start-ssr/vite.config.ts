@@ -67,6 +67,12 @@ import solidPlugin from '@solidjs/vite-plugin';
 //   module (#353). Vite merges the plugin's injected entry into this array.
 // - START_NODE=1 (node mode) sets `start.node`: the build emits the
 //   ready-to-run Node server entry dist/server/node.js beside server.js.
+// - SOLID_PERF_TRACKS (perf-tracks mode) sets `performanceTracks`: `0` opts
+//   out, a JSON object is the options form (`{"minMs":2}`); unset leaves
+//   the default (on under dev serve), which the dev mode asserts.
+// - SOLID_DEV_BUILD=1 (perf-tracks mode) sets `dev: true`, so a `vite
+//   build` resolves the development runtime — the build that must still
+//   carry no performance-tracks injection.
 const jsxCompiler =
   process.env.SOLID_JSX_COMPILER === 'babel' ? ('babel' as const) : ('native' as const);
 const serverComponents = !!process.env.SOLID_SERVER_COMPONENTS;
@@ -147,6 +153,12 @@ export default defineConfig({
       // postures — the server bundle's boundary records and findings locate
       // by component the same way the client's do.
       ...(process.env.SOLID_OBSERVE ? { observe: true } : {}),
+      ...(process.env.SOLID_DEV_BUILD ? { dev: true } : {}),
+      ...(process.env.SOLID_PERF_TRACKS === '0'
+        ? { performanceTracks: false }
+        : process.env.SOLID_PERF_TRACKS
+          ? { performanceTracks: JSON.parse(process.env.SOLID_PERF_TRACKS) }
+          : {}),
       start: serverComponents
         ? { app: 'src/frames/FramesApp.tsx' }
         : process.env.SSR_DOCUMENT
