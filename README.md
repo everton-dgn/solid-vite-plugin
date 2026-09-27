@@ -133,8 +133,9 @@ This is useful for extra logs and debug.
 Resolve Solid's observe builds in production: the production-speed runtime that keeps the
 diagnostics and attribution channels (`OBSERVE`) alive for observability tooling (error
 monitoring, performance tracing). Adds the `observe` export condition to every environment
-and turns on the compiler's `componentNames` option, so component owner labels (`<Home>`)
-survive minification. Under `vite dev` the dev build still wins.
+and turns on the compiler's source names (see `options.solid.sourceNames`), so graph labels
+(`<Home>`, `span.textContent`, `count`) survive minification. Under `vite dev` the dev build
+still wins.
 
 #### options.hot
 
@@ -934,6 +935,40 @@ Pass additional Solid JSX compiler options. Both backends carry the Solid
 defaults (`moduleName: "@solidjs/web"`, the control-flow built-ins,
 custom-element context, and conditional wrapping) internally; anything set
 here is merged over them and applied to whichever backend is selected.
+
+##### options.solid.sourceNames
+
+- Type: `boolean | { components?: boolean; bindings?: boolean; primitives?: boolean }`
+- Default: on in dev and under `observe`, off in production builds
+
+Which names as written in source are carried into output so the dev and observe runtimes
+can label the reactive graph after minification — in diagnostics, `whyDidRun` chains, error
+owner paths, and the Chrome performance tracks. Three kinds:
+
+- `components` emits the tag name (`createComponent(Home, props, "Home")` → owners read
+  `<Home>`).
+- `bindings` names compiled binding effects by what they write (`span.textContent`,
+  `div.class:active`, a hole `div.children`).
+- `primitives` names `createSignal`/`createMemo`/`createStore`/… after the identifier they
+  are declared as (`count`, `doubled`, `todos.title`), prefixed with the enclosing
+  non-component function for composed primitives (`createCounter.value`). An explicit
+  `name` option is never overridden.
+
+The kinds come from two different places. `components` and `bindings` are the JSX compiler's
+own `sourceNames` option, passed through to whichever backend compiles your JSX
+(`@solidjs/compiler` or `@solidjs/babel-plugin`). `primitives` is the native compiler's
+standalone `transformSourceNames` pass — plain JavaScript in and out — which the plugin runs
+on every module it sees, `.ts`/`.js` files included, never inside `node_modules`. The plugin
+always runs its non-JSX work through the native compiler, so babel apps get primitive names
+too.
+
+The default follows the posture: on whenever the plugin compiles for the dev runtime (the
+same `dev` flag it hands the compilers — `vite dev`, or `dev: true`) and for `observe`
+builds; off for production builds, whose runtime ignores the names anyway, so production
+output is unchanged. `sourceNames: false` turns every kind off, in dev too; `true` turns every
+kind on, production builds included. The object form sets the listed kinds and leaves the
+rest at the posture default — `{ primitives: false }` keeps component and binding names in
+dev but skips the primitives pass.
 
 #### options.typescript
 

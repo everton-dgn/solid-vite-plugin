@@ -191,7 +191,38 @@ export interface ExtensionOptions {
 }
 
 export type Compiler = 'babel' | 'native';
-export type SolidOptions = Omit<JsxCompilerOptions, 'filename' | 'sourceMap'>;
+/**
+ * Which source names are carried into output for the dev and observe
+ * runtimes to label the reactive graph with (see
+ * `Options.solid.sourceNames`). Each kind defaults to the posture: on for
+ * dev and `observe`, off for production builds. `components` and `bindings`
+ * are the JSX compiler's `sourceNames` option; `primitives` is the native
+ * compiler's standalone `transformSourceNames` pass, which the plugin runs
+ * on every module — babel apps included.
+ */
+export interface SourceNamesOptions {
+  /** `createComponent(Home, props, "Home")` — owners labelled `<Home>`. */
+  components?: boolean;
+  /** Binding effects named by what they write: `span.textContent`, `div.children`. */
+  bindings?: boolean;
+  /**
+   * Primitives named after the identifier they are declared as —
+   * `createSignal(0, { name: "count" })`, `createCounter.value` inside a
+   * composed primitive — by the native compiler's `transformSourceNames`
+   * pass. Runs on `.ts`/`.js` modules as well as components (outside
+   * node_modules), whichever JSX compiler the app uses.
+   */
+  primitives?: boolean;
+}
+
+export type SolidOptions = Omit<JsxCompilerOptions, 'filename' | 'sourceMap' | 'sourceNames'> & {
+  /**
+   * Source names in output: `true`/`false` for every kind, or per kind.
+   * Defaults to the posture — on for dev and `observe`, off for production
+   * builds; `false` opts out of every kind, in dev too.
+   */
+  sourceNames?: boolean | SourceNamesOptions;
+};
 type NativeCompiler = typeof import('@solidjs/compiler');
 let nativeCompilerPromise: Promise<NativeCompiler> | undefined;
 
@@ -239,8 +270,9 @@ export interface Options {
    * the diagnostics and attribution channels (`OBSERVE`) alive for
    * production observability tooling. Adds the `observe` export condition
    * to every environment (client and server, inlined and externalized) and
-   * turns on the compiler's `componentNames` option so owner labels survive
-   * minification. Applies to `vite build` and preview; under `vite dev` the
+   * turns on the compiler's `sourceNames` (components, bindings, and
+   * primitives) so graph labels survive minification. Applies to `vite
+   * build` and preview; under `vite dev` the
    * `development` condition still wins (the dev build is a superset).
    *
    * @default false
@@ -592,21 +624,110 @@ function getSolidOptions(
   // builtIns, contextToCustomElements, wrapConditionals) are baked into both
   // backends — @solidjs/compiler and @solidjs/babel-plugin — so only the
   // posture this plugin actually decides is passed.
-  // Component labels: the dev and observe runtimes name each component's
-  // owner (`<Home>`) for diagnostics and attribution paths. Without the
-  // compiler carrying the source tag name, a minified build labels owners by
-  // whatever the minifier left of `Comp.name`. Both generates emit it — the
-  // ssr generate from the compilers that carry solidjs/solid#3441
-  // (2.0.0-rc.9), so server findings and boundary records locate by
-  // component too — and the production runtime ignores the argument, so it
-  // is only emitted for the postures whose runtime reads it.
+  // Source names: the dev and observe runtimes label each component's owner
+  // (`<Home>`) and each compiled binding effect (`span.textContent`) for
+  // diagnostics and attribution paths. Without the compiler carrying the
+  // source names, a minified build labels owners by whatever the minifier
+  // left of `Comp.name` and bindings as `effect`. Both generates emit the
+  // component name — the ssr generate from the compilers that carry
+  // solidjs/solid#3441 (2.0.0-rc.9), so server findings and boundary
+  // records locate by component too — and the production runtime ignores
+  // the arguments, so they are only emitted for the postures whose runtime
+  // reads them. Primitive names are the separate transformSourceNames pass
+  // (see getSourceNames / the transform hook), not a JSX-compiler option.
+  //
+  // The compilers default their own `sourceNames` on under `dev` (rc.10), so
+  // the resolved value is always passed — `false` when both kinds are off —
+  // and the plugin's table below, not the compiler default, decides. That is
+  // what makes `solid.sourceNames: false` an opt-out in dev rather than a
+  // no-op.
+  const { sourceNames: _userSourceNames, ...userSolidOptions } = options.solid || {};
+  const { components, bindings } = getSourceNames(options, dev, observe);
   return {
     ...solidOptions,
     ...(serverComponents && solidOptions.generate === 'ssr' ? { serverComponents: true } : {}),
     dev,
-    ...(dev || observe ? { componentNames: true } : {}),
-    ...(options.solid || {}),
+    sourceNames: components || bindings ? { components, bindings } : false,
+    ...userSolidOptions,
   };
+}
+
+/**
+ * Resolve `solid.sourceNames` to one flag per kind — `components` and
+ * `bindings` go to the JSX compiler, `primitives` gates the standalone
+ * `transformSourceNames` pass in the transform hook.
+ *
+ * The default follows the posture. `dev` here is the same flag the compilers
+ * receive as `dev` (`options.dev`, which defaults to on under `vite dev` and
+ * off for `vite build`), and `observe` is `options.observe`; those are the
+ * two runtimes that read the names, and the production runtime ignores them.
+ *
+ * | `solid.sourceNames`     | dev or observe            | production                 |
+ * | ----------------------- | ------------------------- | -------------------------- |
+ * | (unset)                 | all on                    | all off                    |
+ * | `true`                  | all on                    | all on                     |
+ * | `false`                 | all off                   | all off                    |
+ * | `{ kind: true/false }`  | as given; the rest on     | as given; the rest off     |
+ */
+function getSourceNames(
+  options: Partial<Options>,
+  dev: boolean,
+  observe: boolean,
+): Required<SourceNamesOptions> {
+  const posture = dev || observe;
+  const user = options.solid?.sourceNames;
+  if (typeof user === 'boolean') return { components: user, bindings: user, primitives: user };
+  return {
+    components: user?.components ?? posture,
+    bindings: user?.bindings ?? posture,
+    primitives: user?.primitives ?? posture,
+  };
+}
+
+/**
+ * The `sourceNames.primitives` pass is plain JavaScript in and out, so it
+ * also applies to the `.ts`/`.js` modules primitives are composed in — the
+ * ids the JSX transform gate below would otherwise return early for. A
+ * `.d.ts` has nothing to name.
+ */
+const PRIMITIVES_ONLY_MODULE = /\.[mc]?[jt]s$/i;
+const DECLARATION_MODULE = /\.d\.[mc]?ts$/i;
+/**
+ * Cheap pre-check ahead of the native call: the pass only names calls that
+ * resolve to imports from these modules, so source without either string
+ * cannot change.
+ */
+const PRIMITIVE_SOURCES = ['solid-js', '@solidjs/signals'];
+
+let warnedMissingSourceNamesPass = false;
+
+/**
+ * Run the compiler's `transformSourceNames` pass, or leave the code alone
+ * (warning once) on a compiler predating it — the pass is a default-on
+ * nicety for dev/observe, not something to fail a build over.
+ */
+async function transformPrimitiveNames(
+  ctx: { warn(message: string): void },
+  compiler: NativeCompiler,
+  code: string,
+  filename: string,
+): Promise<{ code: string; map: ChainableMap } | null> {
+  if (!PRIMITIVE_SOURCES.some((source) => code.includes(source))) return null;
+  if (typeof compiler.transformSourceNamesAsync !== 'function') {
+    if (!warnedMissingSourceNamesPass) {
+      warnedMissingSourceNamesPass = true;
+      ctx.warn(
+        '@solidjs/vite-plugin: the installed @solidjs/compiler has no transformSourceNames ' +
+          'pass, so primitives keep their generic labels (`signal`, `computed`) in ' +
+          'diagnostics. Update @solidjs/compiler, or set `solid.sourceNames.primitives: false`.',
+      );
+    }
+    return null;
+  }
+  const result = await compiler.transformSourceNamesAsync(code, { filename, sourceMap: true });
+  // Nothing to name: the pass hands the source back verbatim, with no map.
+  if (result.code === code) return null;
+  return { code: result.code, map: result.map };
 }
 
 async function getBabelUserOptions(
@@ -1661,12 +1782,27 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
       const moduleId = id;
       id = id.replace(/\?.*$/, '');
       const isTsrx = isTsrxModule(id);
+      const inNodeModules = /node_modules/.test(id);
+      // Primitive names stop at node_modules: a dependency's internals
+      // (Solid's own flow controls included) name what they mean to name,
+      // and a composed primitive from a library is identified by its
+      // package, not re-labelled by this app's build.
+      const namePrimitives =
+        !inNodeModules && getSourceNames(options, replaceDev, observe).primitives;
 
       if (!(/\.[mc]?[tj]sx$/i.test(id) || isTsrx || allExtensions.includes(currentFileExtension))) {
+        // Not a JSX module. The one pass that still applies is primitive
+        // naming — `createSignal` lives in `.ts`/`.js` as much as in
+        // components — and it runs alone: no lazy/refresh/JSX work.
+        if (namePrimitives && PRIMITIVES_ONLY_MODULE.test(id) && !DECLARATION_MODULE.test(id)) {
+          const compiler = await loadNativeCompiler();
+          const named = await transformPrimitiveNames(this, compiler, source, id);
+          if (named === null) return null;
+          return { code: named.code, map: normalizeSourceMap(named.map) };
+        }
         return null;
       }
 
-      const inNodeModules = /node_modules/.test(id);
       const solidOptions = getSolidOptions(options, !!isSsr, replaceDev, observe, isTestMode);
 
       // We need to know if the current file extension has a typescript options tied to it
@@ -1709,14 +1845,25 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
           ? id
           : id + (shouldBeProcessedWithTypescript ? '.tsx' : '.jsx');
 
-      // Shared native prelude for every mode: the lazy() module-URL pass,
-      // then (dev/client/non-node_modules) the solid-refresh HMR pass, both
-      // operating on pre-JSX source. Only the JSX transform itself differs
-      // between compiler backends. Sourcemaps are collected in application
-      // order and merged at the end.
+      // Shared native prelude for every mode: (dev/observe) the primitive
+      // naming pass, the lazy() module-URL pass, then (dev/client/
+      // non-node_modules) the solid-refresh HMR pass, all operating on
+      // pre-JSX source. Only the JSX transform itself differs between
+      // compiler backends. Sourcemaps are collected in application order and
+      // merged at the end.
       const compiler = await loadNativeCompiler();
       let code = source;
       const maps: ChainableMap[] = [];
+
+      // Authored TSRX cannot be parsed by a standalone pass; its primitives
+      // are named after Solid lowering, on the generated module, below.
+      if (namePrimitives && !isTsrx) {
+        const named = await transformPrimitiveNames(this, compiler, code, nativeFilename);
+        if (named !== null) {
+          code = named.code;
+          maps.push(named.map);
+        }
+      }
 
       if (isTsrx) {
         // Solid lowering preserves authored TypeScript annotations; secondary
@@ -1772,6 +1919,14 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
           code = result.code || '';
           css = babelTsrxCss(result);
           maps.push(result.map);
+        }
+
+        if (namePrimitives) {
+          const named = await transformPrimitiveNames(this, compiler, code, generatedFilename);
+          if (named !== null) {
+            code = named.code;
+            maps.push(named.map);
+          }
         }
 
         const lazyResult = await compiler.transformLazyAsync(code, {
