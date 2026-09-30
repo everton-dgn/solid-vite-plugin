@@ -1412,6 +1412,16 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
           test.environment = 'jsdom';
         }
 
+        // Vitest 5 defaults `test.sharedViteServer` to true: inline projects
+        // then reuse the root Vite server and take their `test` options from
+        // the raw root block captured BEFORE any `config` hook runs, so nothing
+        // injected here (posture, jest-dom, server.deps) reaches them. Vitest
+        // reads the option off the resolved root config (getOwnServerReason), so
+        // this restores per-project resolution as under Vitest 4 (#369).
+        if (userTest.projects && userTest.sharedViteServer === undefined) {
+          test.sharedViteServer = false;
+        }
+
         if (serverTestPosture) {
           // The worker pool is shared across the whole vitest workspace and
           // imports externalized deps natively with `--conditions` derived
