@@ -36,6 +36,10 @@
 //   behind it; `'async'` awaits the settled document (no fallbacks or swap
 //   scripts — complete for no-JS clients); a module path decides per
 //   request, and `handleRequest(request, { renderMode })` overrides both.
+// - `start.nonce` names a module that resolves the request's CSP nonce
+//   after the middleware chain; the handler hands it to the render (every
+//   runtime script and preload), the client-entry tag and the post-flush
+//   redirect fallback, and `handleRequest(request, { nonce })` overrides it.
 // - `vite preview` serves dist/client statically and dispatches everything
 //   else through the built handler — the production path, middleware
 //   included, with no server file needed.
@@ -257,6 +261,35 @@ export interface StartOptions {
    * @default 'stream'
    */
   renderMode?: 'stream' | 'async' | (string & {});
+  /**
+   * Path to a server-only module (resolved relative to the Vite root,
+   * following the `middleware`/`setup`/`renderMode` convention) whose
+   * default export resolves the CSP nonce of a page request: `(event) =>
+   * CSPNonce | undefined | Promise<CSPNonce | undefined>`, where `CSPNonce`
+   * is `@solidjs/web`'s `string | { script: string | false; style: string |
+   * false }`. Called per request inside the request scope after the
+   * middleware chain, so the usual recipe is a middleware that generates
+   * the nonce, stores it on `event.locals` and sets the
+   * `Content-Security-Policy` header, plus a module returning
+   * `event.locals.nonce`.
+   *
+   * The handler passes the resolved nonce to `renderToStream` in the
+   * generated entry — the hydration bootstrap, the streamed data and swap
+   * scripts and the `modulepreload` links all carry it — and to the
+   * injected client-entry tag and the post-flush redirect fallback (in
+   * dev, also to the head tags the handler injects: the style patch and
+   * Vite client scripts, the collected styles and a `csp-nonce` meta for
+   * the Vite client). Authored entries receive it as `context.nonce` in
+   * `render()`. Inline scripts the app's own `Document` renders still read
+   * it themselves (e.g. `getRequestEvent()?.locals.nonce`).
+   *
+   * Hosts driving the handler directly can override it per call with
+   * `handleRequest(request, { nonce })`. Server mode only — ignored in
+   * client mode, whose shell is prerendered once at build time.
+   *
+   * @default undefined
+   */
+  nonce?: string;
   /**
    * Typed, validated environment variables. A schema file — conventionally
    * `env.ts` (or `env.js`) at the project root, probed automatically —
@@ -521,6 +554,26 @@ function resolveRenderMode(
   };
 }
 
+/**
+ * Resolves `start.nonce` at config time to the absolute path of the
+ * per-request module. Only a path is accepted: a nonce is per request by
+ * definition, and a Vite config cannot serialize a closure into the
+ * generated handler.
+ */
+function resolveNonceModule(root: string, value: StartOptions['nonce']): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== 'string') {
+    throw new Error(
+      `[@solidjs/vite-plugin] start.nonce must be the path of a module (relative to the Vite ` +
+        `root) default-exporting a per-request function ((event) => CSPNonce | undefined | ` +
+        `Promise<...>); got ${typeof value}. A Vite config cannot serialize a closure into the ` +
+        `generated handler — put the function in a module (e.g. ./src/nonce.ts) and pass its ` +
+        `path instead.`,
+    );
+  }
+  return path.resolve(root, normalizeUserPath(root, value, 'nonce'));
+}
+
 interface ResolvedEntries {
   /** Root-relative path or virtual id. */
   entryServer: string;
@@ -730,6 +783,8 @@ export function startServe(
    */
   let renderMode: RenderMode = 'stream';
   let renderModePath: string | null = null;
+  /** Absolute path of the per-request CSP nonce module, when configured (server mode). */
+  let noncePath: string | null = null;
 
   function requireEntries(): ResolvedEntries {
     // config() always runs before resolveId/load/configureServer.
@@ -924,12 +979,15 @@ export function startServe(
               `  </DefaultErrorBoundary>`,
             ]
           : [`  <Document />`]),
-        `  ), { manifest });`,
+        `  ), { manifest, nonce: context && context.nonce });`,
         `}`,
       ].join('\n');
     }
     const { app } = requireEntries();
-    const streamOptions = `{ manifest${serverComponents ? ', plugins: [ServerComponentPlugin]' : ''} }`;
+    // `context.nonce` is the request's CSP nonce resolved by the handler
+    // (`start.nonce` or `handleRequest(request, { nonce })`): renderToStream
+    // stamps it on every script and preload the runtime emits.
+    const streamOptions = `{ manifest, nonce: context && context.nonce${serverComponents ? ', plugins: [ServerComponentPlugin]' : ''} }`;
     return [
       `import { renderToStream${setupPath ? ', getRequestEvent' : ''} } from '@solidjs/web';`,
       ...(serverComponents
@@ -977,12 +1035,12 @@ export function startServe(
             `export function render(request, context) {`,
             `  const prepared = setup(getRequestEvent(), App);`,
             `  if (prepared && typeof prepared.then === 'function') {`,
-            `    return prepared.then((component) => ({ ${STREAM_BOX}: renderApp(component || App) }));`,
+            `    return prepared.then((component) => ({ ${STREAM_BOX}: renderApp(component || App, context) }));`,
             `  }`,
-            `  return renderApp(prepared || App);`,
+            `  return renderApp(prepared || App, context);`,
             `}`,
             ``,
-            `function renderApp(Root) {`,
+            `function renderApp(Root, context) {`,
             `  return renderToStream(() => (`,
             ...documentTree('Root', toolbar ? 'DevToolbar' : undefined),
             `  ), ${streamOptions});`,
@@ -1149,7 +1207,7 @@ export function startServe(
     const composeServerFunctions = internal.serverFunctions;
 
     const lines = [
-      `import { createRequestEvent, createSSRResponse, commitEventResponse${middlewarePath ? ', composeMiddleware' : ''} } from '@solidjs/web';`,
+      `import { createRequestEvent, createSSRResponse, commitEventResponse, scriptNonce${isBuild ? '' : ', styleNonce'}${middlewarePath ? ', composeMiddleware' : ''} } from '@solidjs/web';`,
       `import { provideRequestEvent } from ${JSON.stringify(STORAGE_SOURCE)};`,
       `import * as entry from ${JSON.stringify(entryServerSpec())};`,
       ...(middlewarePath
@@ -1158,6 +1216,7 @@ export function startServe(
       ...(renderModePath
         ? [`import renderModeModule from ${JSON.stringify(renderModePath)};`]
         : []),
+      ...(noncePath ? [`import nonceModule from ${JSON.stringify(noncePath)};`] : []),
       ...(externalDev ? [`import DEV_STYLES_HEAD from ${JSON.stringify(DEV_STYLES_ID)};`] : []),
       ...(composeServerFunctions
         ? [
@@ -1201,10 +1260,23 @@ export function startServe(
         `}`,
       );
     } else {
-      const devHead =
-        `<script>${devStylePatch}</script>` +
-        `<script type="module" src="${joinBase(base, '/@vite/client')}"></script>`;
-      lines.push(``, `const DEV_HEAD = ${JSON.stringify(devHead)};`);
+      // Functions of the request's nonce attributes: under a nonce-based
+      // CSP the two scripts carry the script nonce (`'strict-dynamic'` then
+      // trusts the modules the Vite client loads), the collected dev styles
+      // carry the style nonce, and the `csp-nonce` meta hands the style
+      // nonce to the Vite client for the styles it injects on HMR.
+      lines.push(
+        ``,
+        `function devHead(nonceAttr, styleAttr) {`,
+        `  return (styleAttr ? '<meta property="csp-nonce"' + styleAttr + '>' : '') +`,
+        `    '<script' + nonceAttr + '>' + ${JSON.stringify(devStylePatch)} + '</' + 'script>' +`,
+        `    '<script type="module"' + nonceAttr + ' src=' + ${JSON.stringify(JSON.stringify(joinBase(base, '/@vite/client')))} + '></' + 'script>';`,
+        `}`,
+        ``,
+        `function devStyles(html, styleAttr) {`,
+        `  return styleAttr ? html.split('<style data-asset=').join('<style' + styleAttr + ' data-asset=') : html;`,
+        `}`,
+      );
     }
 
     // Middleware: the user module default-exports one fetch-style function
@@ -1262,6 +1334,49 @@ export function startServe(
       );
     }
 
+    // CSP nonce (`start.nonce`): the `handleRequest` option wins, then the
+    // configured module's per-request result. Both take @solidjs/web's
+    // `CSPNonce` shape — a string for every destination, or a
+    // `{ script, style }` pair — and an empty result means no nonce.
+    lines.push(
+      ``,
+      `function assertNonce(nonce, source) {`,
+      `  if (nonce == null || typeof nonce === 'string') return nonce || undefined;`,
+      // A plain `{ script, style }` object and nothing else: a typo'd key or
+      // an array would otherwise normalize to "no nonce" without a word.
+      `  const prototype = typeof nonce === 'object' ? Object.getPrototypeOf(nonce) : undefined;`,
+      `  const destination = (value) => value === undefined || value === false || typeof value === 'string';`,
+      `  if (`,
+      `    (prototype === Object.prototype || prototype === null) &&`,
+      `    Object.keys(nonce).every((key) => key === 'script' || key === 'style') &&`,
+      `    destination(nonce.script) &&`,
+      `    destination(nonce.style)`,
+      `  ) {`,
+      `    return nonce;`,
+      `  }`,
+      `  const got = Array.isArray(nonce) ? 'an array' : prototype ? 'an object with keys ' + JSON.stringify(Object.keys(nonce)) : typeof nonce;`,
+      `  throw new Error('[@solidjs/vite-plugin] ' + source + ' must be a string, a { script, style } object of strings (or false), or undefined; got ' + got);`,
+      `}`,
+    );
+    if (noncePath) {
+      lines.push(
+        `if (typeof nonceModule !== 'function') {`,
+        `  throw new Error('[@solidjs/vite-plugin] start.nonce must default-export a function ' +`,
+        `    '((event) => CSPNonce | undefined | Promise<...>): ' + ${JSON.stringify(noncePath)});`,
+        `}`,
+        `async function resolveNonce(event, options) {`,
+        `  if (options.nonce !== undefined) return assertNonce(options.nonce, 'handleRequest options.nonce');`,
+        `  return assertNonce(await nonceModule(event), 'the start.nonce module (' + ${JSON.stringify(noncePath)} + ') result');`,
+        `}`,
+      );
+    } else {
+      lines.push(
+        `function resolveNonce(event, options) {`,
+        `  return assertNonce(options.nonce, 'handleRequest options.nonce');`,
+        `}`,
+      );
+    }
+
     // No `_$SC` bootstrap injection: the runtime's serialized
     // server-component references self-bootstrap the registry (each
     // hydration script's first reference carries it as an idempotent
@@ -1276,7 +1391,16 @@ export function startServe(
       `}`,
       ``,
       `function createHtmlChunkTransform(clientEntry, extraHead, nonce) {`,
-      `  const nonceAttr = nonce ? ' nonce="' + escapeAttribute(nonce) + '"' : '';`,
+      // The client entry is a script: take the script destination of a
+      // `{ script, style }` pair instead of escaping the object itself.
+      `  const scriptValue = scriptNonce(nonce);`,
+      `  const nonceAttr = scriptValue ? ' nonce="' + escapeAttribute(scriptValue) + '"' : '';`,
+      ...(isBuild
+        ? []
+        : [
+            `  const styleValue = styleNonce(nonce);`,
+            `  const styleAttr = styleValue ? ' nonce="' + escapeAttribute(styleValue) + '"' : '';`,
+          ]),
       `  let first = true;`,
       `  let injected = false;`,
       `  return (chunk) => {`,
@@ -1308,10 +1432,10 @@ export function startServe(
     // styles or the external environment's HMR-tracked virtual styles module.
     if (!isBuild) {
       headParts.push(
-        `DEV_HEAD`,
+        `devHead(nonceAttr, styleAttr)`,
         externalDev
-          ? `(extraHead === undefined ? DEV_STYLES_HEAD : extraHead)`
-          : `(extraHead || '')`,
+          ? `devStyles(extraHead === undefined ? DEV_STYLES_HEAD : extraHead, styleAttr)`
+          : `devStyles(extraHead || '', styleAttr)`,
       );
     }
     if (generated || clientMode) {
@@ -1391,7 +1515,10 @@ export function startServe(
       // inside the request scope and after the middleware chain, so a
       // per-request policy sees the decorated event.
       `  const renderMode = await resolveRenderMode(event, options);`,
-      `  let result = entry.render(request, { clientEntry, ...options.context });`,
+      // Same window for the nonce: after the chain, so a middleware that
+      // generated it (and set the CSP header) has stored it on `locals`.
+      `  const nonce = ${noncePath ? 'await ' : ''}resolveNonce(event, options);`,
+      `  let result = entry.render(request, { clientEntry, nonce, ...options.context });`,
       // renderToStream results are thenables whose then() waits for the
       // *complete* render — check for pipe first so streaming survives, and
       // only await plain promises (async render functions).
@@ -1425,8 +1552,8 @@ export function startServe(
       // script fallback; the transform injects the doctype/head pieces.
       `  return createSSRResponse(result, event, {`,
       `    responseInit: options.responseInit,`,
-      `    nonce: options.nonce,`,
-      `    transformChunk: createHtmlChunkTransform(clientEntry, options.devHead, options.nonce),`,
+      `    nonce: scriptNonce(nonce),`,
+      `    transformChunk: createHtmlChunkTransform(clientEntry, options.devHead, nonce),`,
       `  });`,
       `}`,
       ``,
@@ -1507,6 +1634,12 @@ export function startServe(
           renderMode = 'stream';
           renderModePath = null;
         }
+        // Server-mode only too: the client-mode shell is prerendered once,
+        // so a per-request nonce has nowhere to go. Validated in every mode
+        // like `renderMode`. Authored entries are fine — they receive the
+        // value as `context.nonce`.
+        noncePath = resolveNonceModule(root, options.nonce);
+        if (clientMode) noncePath = null;
         if (env.isPreview) {
           if (clientMode) {
             // Client-mode builds emit a real dist/client/index.html (the

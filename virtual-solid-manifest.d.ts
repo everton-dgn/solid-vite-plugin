@@ -60,6 +60,17 @@ declare module "virtual:solid-ssr-handler" {
        */
       renderMode?: 'stream' | 'async';
       /**
+       * Per-call CSP nonce, overriding `start.nonce` — `@solidjs/web`'s
+       * `CSPNonce`. A string applies to scripts and styles; a
+       * `{ script, style }` object routes each destination, with `false`
+       * leaving it un-nonced. Reaches the
+       * generated entry's `renderToStream` (hydration, streamed data and
+       * swap scripts, `modulepreload` links), the injected client-entry tag
+       * and the post-flush redirect fallback; authored entries receive it
+       * as `context.nonce`.
+       */
+      nonce?: string | { script: string | false; style: string | false };
+      /**
        * Extra fields spread into the request event at creation — the public
        * wrapper→event extension seam. Conventionally `nativeEvent` carries
        * the platform's raw request object; the plugin's dev/preview

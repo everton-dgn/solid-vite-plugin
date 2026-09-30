@@ -141,7 +141,7 @@
 //
 // Requires the plugin built (pnpm build at the repo root) and Google Chrome.
 // Usage: node test/run.mjs
-// [dev|prod|document|css-filter|entries|endpoint|configure|no-middleware|middleware|preview|render-mode|base|builder-order|builder-prepare|extra-input|babel-hmr|frames|external|observe|perf-tracks|detect|vitest|node]
+// [dev|prod|document|css-filter|entries|endpoint|configure|no-middleware|middleware|preview|render-mode|nonce|base|builder-order|builder-prepare|extra-input|babel-hmr|frames|external|observe|perf-tracks|detect|vitest|node]
 // (default: all)
 
 import { spawn, execSync, execFileSync } from 'node:child_process';
@@ -5892,6 +5892,286 @@ async function runVitestMode() {
   );
 }
 
+// `start.nonce` (SSR_NONCE in vite.config.ts): the per-request CSP nonce.
+// Asserted on direct handler dispatch in dev and against the built handler:
+// - `handleRequest(request, { nonce })` reaches the render, not just the
+//   client-entry tag: every <script> (hydration bootstrap, streamed data and
+//   swap scripts, the client entry, the dev head) and every modulepreload
+//   link carries it, escaped, and so does the post-flush redirect fallback;
+//   the `{ script, style }` form works (it used to throw building the entry
+//   tag) and an invalid value — a primitive, an array, a typo'd key — is
+//   rejected,
+// - dev head: the collected styles carry the style nonce and a `csp-nonce`
+//   meta hands it to the Vite client,
+// - `start.setup` renders with the nonce too (its own render path),
+// - the module form (src/nonce.ts) resolves the nonce after the middleware
+//   chain — it reads what src/middleware.ts stored on `event.locals` — and
+//   the runtime option still wins over it,
+// - the built handler does the same through both `handleRequest` and the
+//   default Fetchable (the path hosts like Nitro dispatch through, which
+//   passes no options),
+// - codegen: the nonce module is imported only when configured, and a
+//   missing module path is rejected at config time.
+async function runNonceMode() {
+  const mode = 'nonce';
+  console.log(`\n=== ${mode.toUpperCase()} ===`);
+
+  const withNodeEnvRestored = async (fn) => {
+    const before = process.env.NODE_ENV;
+    try {
+      return await fn();
+    } finally {
+      if (before === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = before;
+    }
+  };
+  const build = (env) =>
+    execSync('pnpm run build', {
+      cwd: exampleDir,
+      stdio: 'pipe',
+      env: { ...process.env, NODE_ENV: 'production', ...env },
+    });
+  const page = (headers) =>
+    new Request('http://localhost/', { headers: { accept: 'text/html', ...(headers || {}) } });
+  // Every script and modulepreload tag in the document, opening tags only.
+  const nonceTargets = (html) => [
+    ...(html.match(/<script\b[^>]*>/g) || []),
+    ...(html.match(/<link\b[^>]*>/g) || []).filter((tag) => tag.includes('modulepreload')),
+  ];
+  const everyTagCarries = (html, value) => {
+    const tags = nonceTargets(html);
+    const attr = ` nonce="${value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')}"`;
+    const missing = tags.filter((tag) => !tag.includes(attr));
+    return {
+      ok: tags.length >= 3 && missing.length === 0,
+      detail: `${tags.length} tags, missing: ${missing.join(' ').slice(0, 200)}`,
+    };
+  };
+  const carriesNone = (html) => !/\snonce="/.test(html);
+
+  // ---- Config validation --------------------------------------------------
+  process.env.SSR_NONCE = './src/no-such-nonce.ts';
+  let configError = '';
+  try {
+    await withNodeEnvRestored(() => resolveConfig({ root: exampleDir }, 'serve'));
+  } catch (e) {
+    configError = String(e && e.message ? e.message : e);
+  } finally {
+    delete process.env.SSR_NONCE;
+  }
+  record(
+    mode,
+    'config',
+    'missing module path rejected at config time',
+    configError.includes('start.nonce') && configError.includes('no-such-nonce'),
+    configError.slice(0, 300) || 'config resolved without error',
+  );
+
+  // ---- Direct dispatch: the runtime option, no module configured ----------
+  let probe;
+  try {
+    probe = await withNodeEnvRestored(() =>
+      createServer({ root: exampleDir, server: { middlewareMode: true } }),
+    );
+    const handler = await probe.environments.ssr.runner.import('virtual:solid-ssr-handler');
+    const stringForm = await (await handler.handleRequest(page(), { nonce: 'dev"<&' })).text();
+    const stringCheck = everyTagCarries(stringForm, 'dev"<&');
+    record(
+      mode,
+      'override',
+      'handleRequest({ nonce }) reaches every script and modulepreload, escaped',
+      stringCheck.ok,
+      stringCheck.detail,
+    );
+    const objectResponse = await handler.handleRequest(page(), {
+      nonce: { script: 'script-only', style: false },
+    });
+    const objectForm = await objectResponse.text();
+    const objectCheck = everyTagCarries(objectForm, 'script-only');
+    record(
+      mode,
+      'override',
+      'the { script, style } form renders with the script nonce',
+      objectResponse.status === 200 && objectCheck.ok,
+      `status ${objectResponse.status}, ${objectCheck.detail}`,
+    );
+    record(
+      mode,
+      'override',
+      'without a nonce the document carries none',
+      carriesNone(await (await handler.handleRequest(page())).text()),
+    );
+    const redirect = await (
+      await handler.handleRequest(
+        new Request('http://localhost/redirect-post', { headers: { accept: 'text/html' } }),
+        { nonce: 'redirect-nonce' },
+      )
+    ).text();
+    record(
+      mode,
+      'override',
+      'post-flush redirect fallback carries the nonce',
+      /<script nonce="redirect-nonce">[^<]*window\.location/.test(redirect),
+    );
+    const devStyle = '<style data-asset="probe.css">.probe{}</style>';
+    const styled = await (
+      await handler.handleRequest(page(), { nonce: 'style-nonce', devHead: devStyle })
+    ).text();
+    record(
+      mode,
+      'override',
+      'dev styles carry the style nonce and a csp-nonce meta is emitted',
+      styled.includes('<style nonce="style-nonce" data-asset="probe.css">') &&
+        styled.includes('<meta property="csp-nonce" nonce="style-nonce">'),
+    );
+    const scriptOnly = await (
+      await handler.handleRequest(page(), {
+        nonce: { script: 'script-only', style: false },
+        devHead: devStyle,
+      })
+    ).text();
+    record(
+      mode,
+      'override',
+      'style: false leaves the dev styles and the meta un-nonced',
+      scriptOnly.includes('<style data-asset="probe.css">') && !scriptOnly.includes('csp-nonce'),
+    );
+    for (const [value, label, expected] of [
+      [42, 'a number', 'number'],
+      [['a'], 'an array', 'an array'],
+      [{ nonce: 'a' }, 'an object with a misspelled key', '["nonce"]'],
+    ]) {
+      let rejection = '';
+      try {
+        await handler.handleRequest(page(), { nonce: value });
+      } catch (e) {
+        rejection = String(e && e.message ? e.message : e);
+      }
+      record(
+        mode,
+        'override',
+        `invalid runtime nonce (${label}) rejected with an actionable error`,
+        rejection.includes('handleRequest options.nonce') && rejection.includes(expected),
+        rejection.slice(0, 200) || 'resolved without error',
+      );
+    }
+    const transformed = await probe.environments.ssr.transformRequest('virtual:solid-ssr-handler');
+    record(
+      mode,
+      'codegen',
+      'no nonce module import without the option',
+      !!transformed && !transformed.code.includes('nonce.ts'),
+    );
+  } catch (e) {
+    record(mode, 'override', 'direct dispatch completed', false, String(e));
+  } finally {
+    await probe?.close();
+  }
+
+  // ---- Direct dispatch: the module, after the middleware chain -------------
+  const moduleEnv = { SSR_NONCE: 'module', SSR_MIDDLEWARE: '1' };
+  Object.assign(process.env, moduleEnv);
+  try {
+    probe = await withNodeEnvRestored(() =>
+      createServer({ root: exampleDir, server: { middlewareMode: true } }),
+    );
+    const handler = await probe.environments.ssr.runner.import('virtual:solid-ssr-handler');
+    const viaModule = await (
+      await handler.handleRequest(page({ 'x-csp-nonce': 'from-locals' }))
+    ).text();
+    const moduleCheck = everyTagCarries(viaModule, 'from-locals');
+    record(
+      mode,
+      'module',
+      'module reads the nonce the middleware stored on event.locals',
+      moduleCheck.ok,
+      moduleCheck.detail,
+    );
+    const overridden = await (
+      await handler.handleRequest(page({ 'x-csp-nonce': 'from-locals' }), { nonce: 'from-option' })
+    ).text();
+    record(
+      mode,
+      'module',
+      'handleRequest({ nonce }) beats the module (precedence)',
+      everyTagCarries(overridden, 'from-option').ok && !overridden.includes('from-locals'),
+    );
+    record(
+      mode,
+      'module',
+      'module returning undefined leaves the document without a nonce',
+      carriesNone(await (await handler.handleRequest(page())).text()),
+    );
+    const transformed = await probe.environments.ssr.transformRequest('virtual:solid-ssr-handler');
+    record(
+      mode,
+      'codegen',
+      'handler imports the configured nonce module',
+      !!transformed && transformed.code.includes('nonce.ts'),
+    );
+  } catch (e) {
+    record(mode, 'module', 'module-config direct dispatch completed', false, String(e));
+  } finally {
+    await probe?.close();
+    for (const key of Object.keys(moduleEnv)) delete process.env[key];
+  }
+
+  // ---- Direct dispatch: start.setup renders through its own path ------------
+  process.env.SSR_SETUP = '1';
+  try {
+    probe = await withNodeEnvRestored(() =>
+      createServer({ root: exampleDir, server: { middlewareMode: true } }),
+    );
+    const handler = await probe.environments.ssr.runner.import('virtual:solid-ssr-handler');
+    const withSetup = await (await handler.handleRequest(page(), { nonce: 'setup-nonce' })).text();
+    const setupCheck = everyTagCarries(withSetup, 'setup-nonce');
+    record(mode, 'setup', 'start.setup render carries the nonce', setupCheck.ok, setupCheck.detail);
+  } catch (e) {
+    record(mode, 'setup', 'setup direct dispatch completed', false, String(e));
+  } finally {
+    await probe?.close();
+    delete process.env.SSR_SETUP;
+  }
+
+  // ---- Built handler --------------------------------------------------------
+  try {
+    console.log('  building (nonce module)…');
+    build(moduleEnv);
+    const built = await import(
+      pathToFileURL(path.join(exampleDir, 'dist/server/server.js')).href + `?nonce=${Date.now()}`
+    );
+    const prodHtml = await (
+      await built.handleRequest(page({ 'x-csp-nonce': 'prod-nonce' }))
+    ).text();
+    const prodCheck = everyTagCarries(prodHtml, 'prod-nonce');
+    record(
+      mode,
+      'prod',
+      'built handler stamps every script and modulepreload',
+      prodCheck.ok && prodHtml.includes('rel="modulepreload"'),
+      prodCheck.detail,
+    );
+    const fetchHtml = await (
+      await built.default.fetch(page({ 'x-csp-nonce': 'fetch-nonce' }))
+    ).text();
+    const fetchCheck = everyTagCarries(fetchHtml, 'fetch-nonce');
+    record(
+      mode,
+      'prod',
+      'default Fetchable (no options) resolves the nonce through the module',
+      fetchCheck.ok,
+      fetchCheck.detail,
+    );
+  } catch (e) {
+    record(mode, 'prod', 'built handler dispatch completed', false, String(e));
+  } finally {
+    // Leave dist in the standard state for anyone poking at it.
+    try {
+      build();
+    } catch {}
+  }
+}
+
 const ALL_MODES = [
   'dev',
   'prod',
@@ -5904,6 +6184,7 @@ const ALL_MODES = [
   'middleware',
   'preview',
   'render-mode',
+  'nonce',
   'base',
   'builder-order',
   'builder-prepare',
@@ -5931,6 +6212,7 @@ for (const mode of modes) {
   else if (mode === 'middleware') await runMiddlewareMode();
   else if (mode === 'preview') await runPreviewMode();
   else if (mode === 'render-mode') await runRenderModeMode();
+  else if (mode === 'nonce') await runNonceMode();
   else if (mode === 'base') await runBaseMode();
   else if (mode === 'builder-order') await runBuilderOrderMode();
   else if (mode === 'builder-prepare') await runBuilderPrepareMode();
