@@ -647,10 +647,17 @@ function getSolidOptions(
   }
 
   // Server components (serverFunctions.components) turn on the SSR-side
-  // behavior-claims transform: ref/on* positions on intrinsic elements
-  // compile to guarded `_bnd` claim holes instead of dropping. SSR-only
-  // by construction (the dom generate ignores the flag), and apps without
-  // the flag compile byte-for-byte as before.
+  // attribute-slot transform: ref/on* positions on intrinsic elements
+  // compile to one guarded `ssrClaim` hole per element instead of dropping
+  // (the runtime marks them `_s:on:<event>` / `_s:ref` for the client
+  // frame's slot reads), a dynamic `class`/`style` compiles to a
+  // whole-attribute `ssrElementAttribute` hole so a client attribute slot
+  // can own it, and a spread element's named ref/on* ride `ssrElement`'s
+  // trailing `claims` thunk. That is the 2.0.0-rc.13 compiler ↔ runtime
+  // contract (the earlier `_bnd` marker is gone; rc.12 was never
+  // published), which is why the compiler and runtime floors move
+  // together. SSR-only by construction (the dom generate ignores the
+  // flag), and apps without the flag compile byte-for-byte as before.
   const serverComponents =
     typeof options.serverFunctions === 'object' && !!options.serverFunctions.components;
 
