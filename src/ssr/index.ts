@@ -2086,8 +2086,16 @@ export function startServe(
                   isStrictSubdirectory(root, serverDir) &&
                   serverDir !== clientOutDir &&
                   !isStrictSubdirectory(serverDir, clientOutDir!);
-                if (!internal.serverFunctions && !hostBuild && safeCleanup) {
-                  rmSync(serverDir, { recursive: true, force: true });
+                if (!internal.serverFunctions && !hostBuild) {
+                  if (safeCleanup) {
+                    rmSync(serverDir, { recursive: true, force: true });
+                  } else {
+                    builder.config.logger.warn(
+                      'Preserving SSR output at ' +
+                        serverDir +
+                        ': automatic cleanup requires a directory inside the project root that does not contain client output.',
+                    );
+                  }
                 }
               },
             },
