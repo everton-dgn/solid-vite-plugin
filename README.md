@@ -1045,7 +1045,7 @@ test: {
 },
 ```
 
-The posture is chosen while each project resolves its own Vite config. Vitest 5 lets inline projects reuse the root Vite server instead (`test.sharedViteServer`, on by default), which skips that step, so the plugin sets `sharedViteServer: false` when the root config declares `test.projects`. Setting the option yourself overrides this; with `true`, every shared project runs with the root config's posture and without the injected `jest-dom` setup file.
+The posture is chosen while each project resolves its own Vite config. Vitest 5 lets inline projects reuse the root Vite server instead (`test.sharedViteServer`, on by default), which skips that step, so the plugin sets `sharedViteServer: false` when the root config declares `test.projects` — trading Vitest 5's shared-server optimization for the per-project resolution Vitest 4 always did. Setting the option yourself overrides this; with `true`, every shared project runs with the root config's posture, without the injected `jest-dom` setup file, and without the plugin's `server.deps` handling (the framework inlined for the server posture, externalized for the client one).
 
 # Credits
 

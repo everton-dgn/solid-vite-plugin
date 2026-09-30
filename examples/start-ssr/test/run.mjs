@@ -5231,6 +5231,53 @@ async function runVitestMode() {
     projectsEnvPass ? undefined : projectsEnvError || `environment: ${projectsEnv}`,
   );
 
+  // Vitest 5 defaults `test.sharedViteServer` to true, and a shared inline
+  // project takes its `test` options from the raw root block captured before
+  // any `config` hook runs — so it would never see the posture, jest-dom
+  // setup file, or server.deps the plugin injects (#369). The plugin turns
+  // sharing off when the root declares `test.projects` and the user hasn't
+  // chosen. Asserted at the config-resolution level, which is
+  // version-independent: the examples pin vitest 4, where the option has no
+  // effect, but the resolved value is what Vitest 5's getOwnServerReason
+  // reads.
+  const resolveSharedViteServer = async (testBlock) => {
+    const resolved = await resolveConfig(
+      { root: exampleDir, mode: 'test', test: testBlock },
+      'serve',
+    );
+    return resolved.test?.sharedViteServer;
+  };
+  const projectsBlock = [{ extends: true, test: { name: 'node', environment: 'node' } }];
+  let sharedWithProjects;
+  let sharedWithoutProjects;
+  let sharedExplicit;
+  let sharedError = '';
+  try {
+    sharedWithProjects = await resolveSharedViteServer({ projects: projectsBlock });
+    sharedWithoutProjects = await resolveSharedViteServer({});
+    sharedExplicit = await resolveSharedViteServer({
+      projects: projectsBlock,
+      sharedViteServer: true,
+    });
+  } catch (e) {
+    sharedError = String(e);
+  }
+  const sharedPass =
+    !sharedError &&
+    sharedWithProjects === false &&
+    sharedWithoutProjects === undefined &&
+    sharedExplicit === true;
+  record(
+    mode,
+    'shared-vite-server',
+    'root config with test.projects gets sharedViteServer: false (untouched without projects, explicit true preserved)',
+    sharedPass,
+    sharedPass
+      ? undefined
+      : sharedError ||
+          `projects: ${sharedWithProjects}, none: ${sharedWithoutProjects}, explicit: ${sharedExplicit}`,
+  );
+
   // The jest-dom setup file is injected only when the PROJECT can resolve
   // `@testing-library/jest-dom` — by walking node_modules up from the Vite
   // root, the way vitest itself resolves bare `setupFiles`. Two ways the
