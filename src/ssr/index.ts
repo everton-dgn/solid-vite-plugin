@@ -480,6 +480,16 @@ function normalizeUserPath(root: string, spec: string, option: string): string {
   return relative;
 }
 
+function isStrictSubdirectory(parent: string, directory: string): boolean {
+  const relative = path.relative(parent, directory);
+  return (
+    relative !== '' &&
+    relative !== '..' &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
 type RenderMode = 'stream' | 'async';
 
 /**
@@ -715,6 +725,7 @@ export function startServe(
   let root = process.cwd();
   let base = '/';
   let isBuild = false;
+  let configBuildApp = false;
   let entries: ResolvedEntries | undefined;
   /** Absolute path of the user's middleware module, when configured. */
   let middlewarePath: string | null = null;
@@ -1508,13 +1519,25 @@ export function startServe(
           renderModePath = null;
         }
         if (env.isPreview) {
+          const previewBuild = externalServer
+            ? {}
+            : {
+                build: { outDir: 'dist/client' },
+                environments: {
+                  ssr: {
+                    build: {
+                      outDir: 'dist/server',
+                    },
+                  },
+                },
+              };
           if (clientMode) {
             // Client-mode builds emit a real dist/client/index.html (the
             // prerendered shell), so preview is Vite's stock static +
             // history-fallback story. When server functions are on, the
             // endpoint dispatches through the kept dist/server handler
             // (configurePreviewServer).
-            return { appType: 'spa', build: { outDir: 'dist/client' } };
+            return { appType: 'spa', ...previewBuild };
           }
           // `vite preview` serves `build.outDir` statically; point it at the
           // client bundle so hashed assets resolve, while HTML (and
@@ -1523,7 +1546,7 @@ export function startServe(
           // `custom` keeps preview from attempting an SPA fallback.
           return {
             appType: 'custom',
-            ...(externalServer ? {} : { build: { outDir: 'dist/client' } }),
+            ...previewBuild,
           };
         }
         const build = env.command === 'build';
@@ -1647,13 +1670,15 @@ export function startServe(
         if (internal.performanceTracks && !isBuild && config.mode !== 'test') {
           performanceTracks = detectPerformanceTracksSubpath(root);
         }
-        if (isBuild && nodeEntry) {
+        {
           const environments = (config as any).environments ?? {};
           const clientBuild = environments.client?.build ?? config.build;
-          const serverBuild = environments.ssr?.build ?? config.build;
+          const serverBuild = environments.ssr?.build;
           clientOutDir = path.resolve(root, clientBuild.outDir);
-          serverOutDir = path.resolve(root, serverBuild.outDir);
+          serverOutDir = path.resolve(root, serverBuild?.outDir ?? 'dist/server');
           clientAssetsDir = clientBuild.assetsDir ?? 'assets';
+        }
+        if (isBuild && nodeEntry) {
           if (externalServer) {
             config.logger.warn(
               '[@solidjs/vite-plugin] start.node is ignored with start.external: the host owns the ' +
@@ -1679,7 +1704,7 @@ export function startServe(
         // is byte-identical with and without the option.
         order: 'post',
         handler(outputOptions, bundle) {
-          if (!isBuild || !nodeEntryApplies) return;
+          if (!isBuild) return;
           const consumer = getEnvironmentConsumer(this.environment);
           if (consumer === 'client') {
             // Where the client build actually landed (authoritative over
@@ -1688,6 +1713,8 @@ export function startServe(
             return;
           }
           if (this.environment?.name !== 'ssr') return;
+          if (outputOptions.dir) serverOutDir = path.resolve(root, outputOptions.dir);
+          if (!nodeEntryApplies) return;
           // The entry imports ./server.js; without that chunk (a provider
           // rewrote the ssr environment's output) it could not run.
           const serverChunk = bundle[SERVER_ENTRY_FILE];
@@ -1878,7 +1905,7 @@ export function startServe(
           server.middlewares.use((req, res, next) => {
             (async () => {
               handlerPromise ??= import(
-                pathToFileURL(path.resolve(root, 'dist/server/server.js')).href
+                pathToFileURL(path.join(serverOutDir!, SERVER_ENTRY_FILE)).href
               );
               const handler = await handlerPromise;
               // Preview's base middleware runs before this post hook and
@@ -2006,6 +2033,14 @@ export function startServe(
           {
             name: 'solid:start/prerender',
             apply: 'build',
+            config: {
+              order: 'post',
+              handler(config) {
+                // The resolved builder always has a default no-op buildApp.
+                // Read the user/plugin callback before Vite adds that default.
+                configBuildApp = !!config.builder?.buildApp;
+              },
+            },
             buildApp: {
               // Post order: this hook owns the whole client-mode app build (the
               // client-build-first orchestration pair is SSR-only). It
@@ -2029,15 +2064,29 @@ export function startServe(
                   await builder.build(ssrEnvironment);
                 }
 
-                const serverDir = path.resolve(root, 'dist/server');
+                const serverDir = serverOutDir!;
                 const handler = await import(
-                  pathToFileURL(path.join(serverDir, 'server.js')).href
+                  pathToFileURL(path.join(serverDir, SERVER_ENTRY_FILE)).href
                 );
                 const response: Response = await handler.handleRequest(
                   new Request(new URL(base || '/', 'http://localhost')),
                 );
-                writeFileSync(path.resolve(root, 'dist/client/index.html'), await response.text());
-                if (!internal.serverFunctions) {
+                writeFileSync(path.join(clientOutDir!, 'index.html'), await response.text());
+                // A host may still need this service for its final server
+                // build, even when the application has no server functions.
+                const hostBuild =
+                  configBuildApp ||
+                  builder.config.plugins.some(
+                    (plugin: Plugin) =>
+                      plugin.name !== 'solid:start/prerender' &&
+                      plugin.buildApp &&
+                      (typeof plugin.buildApp !== 'object' || plugin.buildApp.order !== 'pre'),
+                  );
+                const safeCleanup =
+                  isStrictSubdirectory(root, serverDir) &&
+                  serverDir !== clientOutDir &&
+                  !isStrictSubdirectory(serverDir, clientOutDir!);
+                if (!internal.serverFunctions && !hostBuild && safeCleanup) {
                   rmSync(serverDir, { recursive: true, force: true });
                 }
               },

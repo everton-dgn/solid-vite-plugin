@@ -1,0 +1,155 @@
+// Production proof for relocated environments. An optional Nitro module runs
+// the same assertions against nitro/vite without adding a fixture dependency:
+// NITRO_VITE_MODULE=/absolute/path/to/nitro/dist/vite.mjs node test/host-build.mjs
+import assert from 'node:assert/strict';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { spawnSync } from 'node:child_process';
+import { createServer } from 'node:net';
+import { createBuilder, preview } from 'vite';
+import solid from '@solidjs/vite-plugin';
+
+const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const mode = process.argv[2];
+if (!mode) {
+  const modes = process.env.NITRO_VITE_MODULE
+    ? ['functions', 'static', 'ssr']
+    : ['functions', 'static', 'config-host', 'ssr', 'configured-functions', 'configured-ssr'];
+  for (const test of modes) {
+    const result = spawnSync(process.execPath, [fileURLToPath(import.meta.url), test], {
+      stdio: 'inherit',
+      env: process.env,
+    });
+    assert.equal(result.status, 0, `${test} production proof failed`);
+  }
+  if (!process.env.NITRO_VITE_MODULE) await import('./cleanup-target.mjs');
+} else {
+  const configured = mode.startsWith('configured-');
+  const serverFunctions = mode === 'functions' || configured;
+  const ssr = mode === 'ssr' || mode === 'configured-ssr';
+  const output = path.join(root, 'dist', `host-${process.pid}`);
+  const clientDir = path.join(output, 'public');
+  const serverDir = path.join(output, 'service');
+  let consumed = false;
+  const buildService = async (builder) => {
+    for (const environment of Object.values(builder.environments)) {
+      if (!environment.isBuilt) await builder.build(environment);
+    }
+    assert.ok(existsSync(path.join(serverDir, 'server.js')), 'host service retained');
+    consumed = true;
+  };
+  const miniatureHost = {
+    name: 'fixture:host',
+    config() {
+      return {
+        ...(mode === 'config-host' ? { builder: { buildApp: buildService } } : {}),
+      };
+    },
+    configEnvironment(name, config) {
+      if (name === 'client') config.build.outDir = clientDir;
+      if (name === 'ssr') config.build.outDir = serverDir;
+    },
+    buildApp:
+      mode === 'config-host'
+        ? undefined
+        : {
+            order: 'post',
+            async handler(builder) {
+              await buildService(builder);
+              if (!ssr) {
+                assert.ok(existsSync(path.join(clientDir, 'index.html')), 'shell ready for host');
+              }
+            },
+          },
+  };
+  const makeHost = async () => {
+    if (!process.env.NITRO_VITE_MODULE) return miniatureHost;
+    const { nitro } = await import(pathToFileURL(process.env.NITRO_VITE_MODULE).href);
+    return nitro({
+      preset: 'node-server',
+      output: { dir: output, publicDir: clientDir, serverDir: path.join(output, 'server') },
+      buildDir: path.join(output, 'nitro'),
+    });
+  };
+  // Nitro treats port 0 as its default port. Reserve an available port before
+  // starting preview so the proof never shares a user's running service.
+  const reservation = createServer();
+  await new Promise((resolve) => reservation.listen(0, '127.0.0.1', resolve));
+  const port = reservation.address().port;
+  await new Promise((resolve) => reservation.close(resolve));
+  const config = async () => ({
+    root,
+    configFile: false,
+    plugins: [
+      solid({ start: true, ssr, serverFunctions }),
+      ...(configured ? [] : [await makeHost()]),
+    ],
+    ...(configured
+      ? { environments: { ssr: { build: { outDir: path.join(output, 'user-server') } } } }
+      : {}),
+    preview: { host: '127.0.0.1', port, strictPort: true },
+  });
+  const builder = await createBuilder(await config());
+  await builder.buildApp();
+  const builtClientDir = configured ? path.join(root, 'dist/client') : clientDir;
+  const builtServerDir = path.resolve(root, builder.environments.ssr.config.build.outDir);
+  if (!configured && !process.env.NITRO_VITE_MODULE) {
+    assert.ok(consumed, 'host orchestrator ran');
+    assert.ok(existsSync(path.join(serverDir, 'server.js')), 'host service survives prerender');
+  }
+  if (!ssr) {
+    const shell = readFileSync(path.join(builtClientDir, 'index.html'), 'utf8');
+    assert.ok(shell.startsWith('<!DOCTYPE html><html'), 'complete generated shell');
+    assert.ok(!shell.includes('CLIENT-RENDERED-APP'), 'app remains client-rendered');
+    assert.ok(!shell.includes('_$HY'), 'no hydration script in client shell');
+    for (const [, url] of shell.matchAll(/(?:src|href)="(\/assets\/[^\"]+)"/g)) {
+      assert.ok(existsSync(path.join(builtClientDir, url)), `shell asset exists: ${url}`);
+    }
+    assert.match(shell, /<script[^>]+src="\/assets\//, 'hashed client entry');
+    assert.match(shell, /<link[^>]+href="\/assets\//, 'entry CSS in shell');
+  }
+  const server = await preview(await config());
+  try {
+    if (configured) {
+      assert.equal(
+        path.resolve(root, server.config.environments.ssr.build.outDir),
+        builtServerDir,
+        'explicit SSR outDir resolves consistently for build and preview',
+      );
+    }
+    const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
+    const response = await fetch(origin + '/', { headers: { accept: 'text/html' } });
+    assert.equal(response.status, 200);
+    const html = await response.text();
+    assert.match(html, /<title>Start Client<\/title>/);
+    assert.equal(html.includes('CLIENT-RENDERED-APP'), ssr);
+    for (const [, url] of html.matchAll(/(?:src|href)="(\/assets\/[^\"]+)"/g)) {
+      assert.equal((await fetch(origin + url)).status, 200, `HTTP asset: ${url}`);
+    }
+    if (serverFunctions) {
+      const assets = readdirSync(path.join(builtClientDir, 'assets'))
+        .filter((file) => file.endsWith('.js'))
+        .map((file) => readFileSync(path.join(builtClientDir, 'assets', file), 'utf8'))
+        .join('\n');
+      const id = /ping-[a-zA-Z0-9_-]+/.exec(assets)?.[0];
+      assert.ok(id, 'compiled server function id');
+      const endpoint = await fetch(
+        `${origin}/_server/${id}?args=${encodeURIComponent('["host"]')}`,
+        {
+          method: 'POST',
+          headers: { 'Sec-Fetch-Site': 'same-origin' },
+        },
+      );
+      assert.equal(endpoint.status, 200);
+      assert.equal(await endpoint.text(), 'pong:host');
+    }
+    console.log(
+      `PASS ${process.env.NITRO_VITE_MODULE ? 'nitro' : 'miniature host'} ${mode}: production shell, assets and HTTP dispatch`,
+    );
+  } finally {
+    await new Promise((resolve, reject) =>
+      server.httpServer.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+}
