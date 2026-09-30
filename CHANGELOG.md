@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.0.0-next.47
+
+### Patch Changes
+
+- 884571b: Under `vite dev`, pages now answer HEAD requests, and GET requests with `Accept: */*` or no Accept, the way production does. Before, these got Vite's 404. The page-request test now matches Vite's own HTML fallback.
+- 995727b: Require solid-js / @solidjs/web 2.0.0-rc.13 (peer floor) and compile with @solidjs/compiler / @solidjs/babel-plugin rc.13 — runtime and compiler move in lockstep. rc.13 is the first published release with the new server-component SSR marker contract (rc.12 was never published): under `serverComponents`, a dynamic `class`/`style` compiles to a whole-attribute `ssrElementAttribute` hole, a spread element's named `ref`/`on*` ride `ssrElement`'s trailing `claims` thunk, and the runtime marks ref/event positions `_s:on:*` / `_s:ref` in place of the `_bnd` behavior-claim marker, which the rc.13 runtime no longer reads. With the old `^2.0.0-rc.10` floor an existing lockfile could keep a ≤ rc.11 compiler while the app's runtime moved to rc.13, so `serverFunctions.components` apps would emit markers the runtime ignores; the floor bump closes that window. Nothing else the plugin couples to changed between rc.11 and rc.13, so this is a range bump only.
+- ec6c4dc: When the root config declares `test.projects` and leaves `test.sharedViteServer` unset, the plugin now sets it to `false` so every inline project resolves its own Vite config, as under Vitest 4; an explicit value is respected. Vitest 5 defaults the option to `true`, and a shared inline project takes its `test` options from the raw root block captured before any `config` hook runs, so it lost everything the plugin injects (posture, the `@testing-library/jest-dom` setup file, `server.deps`). Refs #369.
+
 ## 3.0.0-next.46
 
 ### Patch Changes
