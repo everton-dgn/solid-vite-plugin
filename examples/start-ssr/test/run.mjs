@@ -552,6 +552,33 @@ async function runHttpChecks(mode, origin) {
     'post-flush redirect emits the script fallback',
     post.html.includes('window.location') && post.html.includes('/redirected-target'),
   );
+
+  // Pages answer what Vite's HTML fallback counts as navigations, as in
+  // production: HEAD, a `*/*` GET (curl, fetch()), a GET with no Accept.
+  const head = await rawRequest(origin + '/', { method: 'HEAD' });
+  record(
+    mode,
+    'http',
+    'HEAD answers like GET',
+    head.status === 200 && head.text === '',
+    `status ${head.status}`,
+  );
+  const anyType = await rawRequest(origin + '/', { headers: { accept: '*/*' } });
+  record(
+    mode,
+    'http',
+    'GET accepting */* renders the page',
+    anyType.status === 200 && anyType.text.includes('SSR Start Mode'),
+    `status ${anyType.status}`,
+  );
+  const noAccept = await rawRequest(origin + '/');
+  record(
+    mode,
+    'http',
+    'GET without Accept renders the page',
+    noAccept.status === 200 && noAccept.text.includes('SSR Start Mode'),
+    `status ${noAccept.status}`,
+  );
 }
 
 // Lazy asset-key checks (the /lazy-assets surface, src/App.tsx): a
@@ -1969,13 +1996,19 @@ async function runEndpointMode() {
       functionId ? `got ${JSON.stringify(customText)}` : 'could not extract function id',
     );
 
-    const fallback = await fetch(`${origin}/_server/${encodeURIComponent(functionId || '')}`);
+    const fallback = functionId
+      ? await fetch(
+          `${origin}/_server/${encodeURIComponent(functionId)}?args=${encodeURIComponent('["endpoint"]')}`,
+          { method: 'POST' },
+        )
+      : null;
+    const fallbackText = fallback ? await fallback.text() : '';
     record(
       mode,
       'rpc',
       'default endpoint no longer handled',
-      fallback.status !== 200,
-      `status ${fallback.status}`,
+      !!fallback && fallbackText !== 'hello endpoint from the server',
+      fallback ? `status ${fallback.status}` : 'could not extract function id',
     );
   } catch (e) {
     record(
