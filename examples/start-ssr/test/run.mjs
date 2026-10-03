@@ -170,6 +170,7 @@ import {
 import http from 'node:http';
 import os from 'node:os';
 import {
+  build as viteBuild,
   createServer,
   createServerHotChannel,
   createServerModuleRunner,
@@ -2496,7 +2497,7 @@ async function runExtraInputMode() {
 async function runFileNamesMode() {
   const mode = 'file-names';
   console.log(`\n=== ${mode.toUpperCase()} ===`);
-  const port = 3184;
+  const port = 3185;
   const origin = `http://localhost:${port}`;
   const routeKey = 'src/routes/[...rest].tsx';
   const clientDir = path.join(exampleDir, 'dist/client');
@@ -2657,6 +2658,59 @@ async function runFileNamesMode() {
       'sanitizeFileName: false is left alone (raw [...rest]-<hash>.js)',
       !!rawChunk && /^assets\/\[\.\.\.rest\]-[\w-]+\.js$/.test(rawChunk),
       `file: ${rawChunk}`,
+    );
+
+    // preserveModules keeps each module's path in its name, `../` segments
+    // included, so the collapse only touches the last segment: a library
+    // built from a directory whose path has a dot run is rejected by the
+    // bundler if the directories change.
+    const dotLib = path.join(exampleDir, 'test-dot..lib');
+    rmSync(dotLib, { recursive: true, force: true });
+    mkdirSync(path.join(dotLib, 'src/card'), { recursive: true });
+    writeFileSync(
+      path.join(dotLib, 'src/index.tsx'),
+      "export { Button } from './Button';\nexport { Card } from './card/Card';\n",
+    );
+    writeFileSync(
+      path.join(dotLib, 'src/Button.tsx'),
+      'export function Button(props) {\n  return <button>{props.label}</button>;\n}\n',
+    );
+    writeFileSync(
+      path.join(dotLib, 'src/card/Card.tsx'),
+      'export function Card(props) {\n  return <section>{props.title}</section>;\n}\n',
+    );
+    let libFiles = [];
+    let libError = '';
+    try {
+      const { default: solid } = await import('@solidjs/vite-plugin');
+      await viteBuild({
+        configFile: false,
+        logLevel: 'silent',
+        root: dotLib,
+        plugins: [solid()],
+        build: {
+          outDir: 'out',
+          minify: false,
+          lib: { entry: 'src/index.tsx', formats: ['es'] },
+          rolldownOptions: {
+            external: [/^solid-js/, /^@solidjs\/web/],
+            output: { preserveModules: true },
+          },
+        },
+      });
+      libFiles = distPaths(path.join(dotLib, 'out')).sort();
+    } catch (e) {
+      libError = String(e && e.message ? e.message : e).replace(/\x1b\[[0-9;]*m/g, '');
+    } finally {
+      rmSync(dotLib, { recursive: true, force: true });
+    }
+    record(
+      mode,
+      'preserve-modules',
+      'a preserveModules build from a directory with a dot run keeps module paths',
+      // Lib mode names the files after the package; one per module.
+      !libError && libFiles.filter((f) => f.endsWith('.js')).length === 3,
+      libError.slice(0, 300) || libFiles.join(', '),
     );
   } catch (e) {
     record(
