@@ -285,7 +285,8 @@ export interface StartOptions {
    *
    * Hosts driving the handler directly can override it per call with
    * `handleRequest(request, { nonce })`. Server mode only: client mode
-   * ignores it, since its shell is prerendered once at build time.
+   * ignores it, since its shell is prerendered once at build time (the
+   * per-call override still reaches the shell the dev server renders).
    *
    * @default undefined
    */

@@ -588,8 +588,9 @@ with `script-src 'nonce-…'` and no `'unsafe-inline'`. A module path
 (relative to the Vite root, following the `middleware`/`setup`/`renderMode`
 convention) default-exporting `(event) => CSPNonce | undefined |
 Promise<...>`, where `CSPNonce` is `@solidjs/web`'s `string | { script,
-style }` (each a string, or `false` to leave that destination un-nonced). It runs inside the request scope after the middleware chain, so
-the middleware that generates the nonce and sets the header can hand it over
+style }` (each a string, or `false` to leave that destination un-nonced).
+It runs inside the request scope after the middleware chain, so the
+middleware that generates the nonce and sets the header can hand it over
 through `event.locals`:
 
 ```ts
@@ -602,7 +603,10 @@ solid({
 // src/middleware.ts
 import { getRequestEvent } from '@solidjs/web';
 
-export default async function csp(request: Request, next: (request?: Request) => Promise<Response>) {
+export default async function csp(
+  request: Request,
+  next: (request?: Request) => Promise<Response>,
+) {
   const nonce = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
   getRequestEvent()!.locals.nonce = nonce;
   const response = await next();
@@ -631,7 +635,8 @@ receive the value as `context.nonce` in `render()`. Hosts driving the handler
 directly can pass `handleRequest(request, { nonce })`, which wins over the
 module unless it's empty (`undefined`, `null` or `''`). Server mode only: the
 client-mode shell is prerendered once at build time, so there is no request
-to take a nonce from.
+to take a nonce from (the per-call option still reaches the shell the dev
+server renders).
 
 **`env`** — first-party typed environment variables. A schema file at the
 project root — `env.ts` (or `env.js`), probed automatically; point
