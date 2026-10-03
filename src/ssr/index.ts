@@ -1552,6 +1552,10 @@ export function startServe(
       // The runtime's response-head lifecycle: commit at shell flush,
       // pre-flush Location as a real redirect, post-flush Location as the
       // script fallback; the transform injects the doctype/head pieces.
+      // createSSRResponse writes a single script (the fallback), so a
+      // `{ script, style }` nonce contributes its script value there, as
+      // with @solidjs/web's other single-script surfaces. The transform
+      // splits the pair itself.
       `  return createSSRResponse(result, event, {`,
       `    responseInit: options.responseInit,`,
       `    nonce: scriptNonce(nonce),`,
