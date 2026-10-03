@@ -65,6 +65,11 @@ import solidPlugin from '@solidjs/vite-plugin';
 //   module App.tsx also lazily imports — as a further client build input,
 //   the shape filesystem-routing's `buildInputs` produces for every route
 //   module (#353). Vite merges the plugin's injected entry into this array.
+// - SANITIZE_FILE_NAME (file-names mode) sets the build's
+//   `output.sanitizeFileName`: `custom` is a user function (unsafe
+//   characters become `~`, which the bundler default never produces) that
+//   the plugin's client dot-run collapse must compose with; `off` is
+//   `false`, the opt-out the plugin leaves alone (#391).
 // - START_NODE=1 (node mode) sets `start.node`: the build emits the
 //   ready-to-run Node server entry dist/server/node.js beside server.js.
 // - SOLID_PERF_TRACKS (perf-tracks mode) sets `performanceTracks`: `0` opts
@@ -131,6 +136,20 @@ export default defineConfig({
     ? {
         environments: {
           client: { build: { rollupOptions: { input: ['src/ExtraInput.tsx'] } } },
+        },
+      }
+    : {}),
+  ...(process.env.SANITIZE_FILE_NAME
+    ? {
+        build: {
+          rollupOptions: {
+            output: {
+              sanitizeFileName:
+                process.env.SANITIZE_FILE_NAME === 'off'
+                  ? false
+                  : (name: string) => name.replace(/[^\w.-]/g, '~'),
+            },
+          },
         },
       }
     : {}),
