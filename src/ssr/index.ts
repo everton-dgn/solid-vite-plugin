@@ -1346,10 +1346,10 @@ export function startServe(
       `function assertNonce(nonce, source) {`,
       `  if (nonce == null || typeof nonce === 'string') return nonce || undefined;`,
       // A plain object with both destinations and nothing else, as the
-      // `CSPNonce` type has it: a missing or typo'd key or an array would
-      // otherwise leave a destination without a nonce without a word.
+      // `CSPNonce` type has it: a missing, empty or typo'd key or an array
+      // would otherwise leave a destination without a nonce without a word.
       `  const prototype = typeof nonce === 'object' ? Object.getPrototypeOf(nonce) : undefined;`,
-      `  const destination = (value) => value === false || typeof value === 'string';`,
+      `  const destination = (value) => value === false || (typeof value === 'string' && value !== '');`,
       `  if (`,
       `    (prototype === Object.prototype || prototype === null) &&`,
       `    Object.keys(nonce).every((key) => key === 'script' || key === 'style') &&`,
@@ -1359,7 +1359,7 @@ export function startServe(
       `    return nonce;`,
       `  }`,
       `  const got = Array.isArray(nonce) ? 'an array' : prototype ? 'an object with keys ' + JSON.stringify(Object.keys(nonce)) : typeof nonce;`,
-      `  throw new Error('[@solidjs/vite-plugin] ' + source + ' must be a string, a { script, style } object (each a string or false), or undefined; got ' + got);`,
+      `  throw new Error('[@solidjs/vite-plugin] ' + source + ' must be a string, a { script, style } object (each a non-empty string or false), or undefined; got ' + got);`,
       `}`,
     );
     if (noncePath) {
