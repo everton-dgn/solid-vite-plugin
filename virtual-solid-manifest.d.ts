@@ -59,11 +59,11 @@ declare module "virtual:solid-ssr-handler" {
        * leaves the nonce to `start.nonce`. It reaches the generated entry's
        * `renderToStream` (hydration, streamed data and swap scripts,
        * `modulepreload` links), the injected client-entry tag and the
-       * post-flush redirect fallback; authored entries receive it as
+       * post-flush redirect fallback; the entry's `render` receives it as
        * `context.nonce`, in place of a `nonce` passed in `context`, which
-       * reaches them unchanged when no nonce resolves.
+       * reaches the entry unchanged when no nonce resolves.
        */
-      nonce?: CSPNonce;
+      nonce?: CSPNonce | null;
       /**
        * Per-call render mode, overriding `start.renderMode` (static value or
        * per-request module alike). `'stream'` flushes the document shell

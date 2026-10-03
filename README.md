@@ -631,12 +631,13 @@ scripts (with `'strict-dynamic'`, the modules they load are trusted in turn),
 the collected styles, and a `csp-nonce` meta the Vite client reads for the
 styles it injects. Inline scripts your own `Document` renders still need it
 spelled out (`nonce={getRequestEvent()?.locals.nonce}`). Authored entries
-receive the value as `context.nonce` in `render()`. Hosts driving the handler
-directly can pass `handleRequest(request, { nonce })`, which wins over the
-module unless it's empty (`undefined`, `null` or `''`). Server mode only: the
-client-mode shell is prerendered once at build time, so there is no request
-to take a nonce from (the per-call option still reaches the shell the dev
-server renders).
+receive the value as `context.nonce` in `render()` (a `nonce` passed in
+`handleRequest`'s `context` is left alone when none resolves). Hosts driving
+the handler directly can pass `handleRequest(request, { nonce })`, which wins
+over the module unless it's empty (`undefined`, `null` or `''`). Server mode
+only: the client-mode shell is prerendered once at build time, so there is no
+request to take a nonce from (the per-call option still reaches the shell the
+dev server renders).
 
 **`env`** — first-party typed environment variables. A schema file at the
 project root — `env.ts` (or `env.js`), probed automatically; point
