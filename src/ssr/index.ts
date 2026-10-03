@@ -274,8 +274,8 @@ export interface StartOptions {
    * `event.locals.nonce`.
    *
    * The handler passes the resolved nonce to `renderToStream` in the
-   * generated entry — the hydration bootstrap, the streamed data and swap
-   * scripts and the `modulepreload` links all carry it — and to the
+   * generated entry, so the hydration bootstrap, the streamed data and swap
+   * scripts and the `modulepreload` links all carry it. It also reaches the
    * injected client-entry tag and the post-flush redirect fallback (in
    * dev, also to the head tags the handler injects: the style patch and
    * Vite client scripts, the collected styles and a `csp-nonce` meta for
@@ -284,8 +284,8 @@ export interface StartOptions {
    * it themselves (e.g. `getRequestEvent()?.locals.nonce`).
    *
    * Hosts driving the handler directly can override it per call with
-   * `handleRequest(request, { nonce })`. Server mode only — ignored in
-   * client mode, whose shell is prerendered once at build time.
+   * `handleRequest(request, { nonce })`. Server mode only: client mode
+   * ignores it, since its shell is prerendered once at build time.
    *
    * @default undefined
    */
@@ -567,7 +567,7 @@ function resolveNonceModule(root: string, value: StartOptions['nonce']): string 
       `[@solidjs/vite-plugin] start.nonce must be the path of a module (relative to the Vite ` +
         `root) default-exporting a per-request function ((event) => CSPNonce | undefined | ` +
         `Promise<...>); got ${typeof value}. A Vite config cannot serialize a closure into the ` +
-        `generated handler — put the function in a module (e.g. ./src/nonce.ts) and pass its ` +
+        `generated handler, so put the function in a module (e.g. ./src/nonce.ts) and pass its ` +
         `path instead.`,
     );
   }
@@ -1336,8 +1336,8 @@ export function startServe(
 
     // CSP nonce (`start.nonce`): the `handleRequest` option wins, then the
     // configured module's per-request result. Both take @solidjs/web's
-    // `CSPNonce` shape — a string for every destination, or a
-    // `{ script, style }` pair — and an empty result means no nonce.
+    // `CSPNonce` shape (a string for every destination, or a
+    // `{ script, style }` pair), and an empty result means no nonce.
     lines.push(
       ``,
       `function assertNonce(nonce, source) {`,
@@ -1517,8 +1517,10 @@ export function startServe(
       `  const renderMode = await resolveRenderMode(event, options);`,
       // Same window for the nonce: after the chain, so a middleware that
       // generated it (and set the CSP header) has stored it on `locals`.
+      // It goes after `options.context` so the render can't get a different
+      // value from the one the client-entry tag and the redirect fallback get.
       `  const nonce = ${noncePath ? 'await ' : ''}resolveNonce(event, options);`,
-      `  let result = entry.render(request, { clientEntry, nonce, ...options.context });`,
+      `  let result = entry.render(request, { clientEntry, ...options.context, nonce });`,
       // renderToStream results are thenables whose then() waits for the
       // *complete* render — check for pipe first so streaming survives, and
       // only await plain promises (async render functions).
@@ -1636,7 +1638,7 @@ export function startServe(
         }
         // Server-mode only too: the client-mode shell is prerendered once,
         // so a per-request nonce has nowhere to go. Validated in every mode
-        // like `renderMode`. Authored entries are fine — they receive the
+        // like `renderMode`. Authored entries are fine: they receive the
         // value as `context.nonce`.
         noncePath = resolveNonceModule(root, options.nonce);
         if (clientMode) noncePath = null;

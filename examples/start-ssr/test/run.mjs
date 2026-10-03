@@ -5899,13 +5899,13 @@ async function runVitestMode() {
 //   swap scripts, the client entry, the dev head) and every modulepreload
 //   link carries it, escaped, and so does the post-flush redirect fallback;
 //   the `{ script, style }` form works (it used to throw building the entry
-//   tag) and an invalid value — a primitive, an array, a typo'd key — is
+//   tag) and an invalid value (a primitive, an array, a typo'd key) is
 //   rejected,
 // - dev head: the collected styles carry the style nonce and a `csp-nonce`
 //   meta hands it to the Vite client,
 // - `start.setup` renders with the nonce too (its own render path),
 // - the module form (src/nonce.ts) resolves the nonce after the middleware
-//   chain — it reads what src/middleware.ts stored on `event.locals` — and
+//   chain (it reads what src/middleware.ts stored on `event.locals`), and
 //   the runtime option still wins over it,
 // - the built handler does the same through both `handleRequest` and the
 //   default Fetchable (the path hosts like Nitro dispatch through, which
@@ -5994,6 +5994,22 @@ async function runNonceMode() {
       'the { script, style } form renders with the script nonce',
       objectResponse.status === 200 && objectCheck.ok,
       `status ${objectResponse.status}, ${objectCheck.detail}`,
+    );
+    // A host's `context` must not hand the render a different nonce from the
+    // one the client-entry tag and the redirect fallback get.
+    const contextForm = await (
+      await handler.handleRequest(page(), {
+        nonce: 'option-nonce',
+        context: { nonce: 'context-nonce' },
+      })
+    ).text();
+    const contextCheck = everyTagCarries(contextForm, 'option-nonce');
+    record(
+      mode,
+      'override',
+      'options.context.nonce does not override the resolved nonce',
+      contextCheck.ok && !contextForm.includes('context-nonce'),
+      contextCheck.detail,
     );
     record(
       mode,
