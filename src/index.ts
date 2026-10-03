@@ -1057,17 +1057,17 @@ function defaultSanitizeFileName(name: string): string {
 }
 
 /**
- * The client build's `output.sanitizeFileName`: the user's sanitizer, or the
- * default when none is set, then every run of dots collapsed to one. Chunk
- * and asset names come from file names, and the default only swaps the
- * brackets of a catch-all route module: `[...404].tsx` built to
- * `_...404_-<hash>.js`, plus a CSS asset Vite names after that chunk. Hosts,
- * CDNs and middleware whose traversal guard rejects any URL containing `..`
- * refused the lazy route's chunk, and its hydration broke (#391). A run
- * collapses to a single dot instead of being dropped because the bundler
- * splits `[name]` and `[extname]` off the sanitized name: an asset whose own
- * name has dots against its extension (`logo..png`) would otherwise lose it
- * and build to `logopng-<hash>.`.
+ * The build's `output.sanitizeFileName`: the user's sanitizer, or the default
+ * when none is set, then every run of dots collapsed to one. Chunk and asset
+ * names come from file names, and the default only swaps the brackets of a
+ * catch-all route module: `[...404].tsx` built to `_...404_-<hash>.js`, plus a
+ * CSS asset Vite names after that chunk. Hosts, CDNs and middleware whose
+ * traversal guard rejects any URL containing `..` refused the lazy route's
+ * chunk, and its hydration broke (#391). A run collapses to a single dot
+ * instead of being dropped because the bundler splits `[name]` and
+ * `[extname]` off the sanitized name: an asset whose own name has dots
+ * against its extension (`logo..png`) would otherwise lose it and build to
+ * `logopng-<hash>.`.
  */
 function collapseDotRuns(
   sanitizeFileName: true | ((name: string) => string) | undefined,
@@ -1913,15 +1913,16 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
     },
 
     outputOptions(outputOptions) {
-      // Client builds only: their file names become URLs (see
-      // collapseDotRuns); server output is never fetched by URL. This hook
+      // Every build environment, not just the client: client file names
+      // become URLs (see collapseDotRuns), and the server bundle writes the
+      // URLs of the assets it imports, computed with its own sanitizer.
+      // Collapsing on one side only would point server-rendered `src` and
+      // `href` attributes at files the client build never wrote. This hook
       // sees the final output options, so it wraps whatever sanitizer the
       // user or another plugin set, wherever it was configured.
       // `sanitizeFileName: false` is left as is: it is the one spelling that
       // asks for raw names, and wrapping it too would leave no way out.
-      if (!isBuild || !isClientBuild(this) || outputOptions.sanitizeFileName === false) {
-        return null;
-      }
+      if (!isBuild || outputOptions.sanitizeFileName === false) return null;
       return {
         ...outputOptions,
         sanitizeFileName: collapseDotRuns(outputOptions.sanitizeFileName),

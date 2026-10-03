@@ -124,10 +124,12 @@
 //     entry: the built handler boots the real entry chunk and links the entry
 //     graph's stylesheet even though the extra input is an `isEntry` record
 //     sorting ahead of it (#353),
-//   - client file names carry no `..` (file-names mode): the catch-all route
+//   - built file names carry no `..` (file-names mode): the catch-all route
 //     module src/routes/[...rest].tsx builds to a chunk and a CSS asset whose
 //     names collapse the dot run, and server.js (which refuses any URL
-//     containing `..`) serves both; a user `sanitizeFileName`
+//     containing `..`) serves both; the server build collapses too, so the
+//     URL it writes for an asset named with a dot run (mark..svg) is the
+//     file the client build wrote; a user `sanitizeFileName`
 //     (SANITIZE_FILE_NAME=custom) still runs, with the collapse after it, and
 //     `sanitizeFileName: false` (SANITIZE_FILE_NAME=off) is left alone (#391),
 //   - `start.node` (node mode, START_NODE=1): the build emits a ready-to-run
@@ -2470,20 +2472,22 @@ async function runExtraInputMode() {
   }
 }
 
-// Client file names (#391): a filesystem router's catch-all route module,
+// Built file names (#391): a filesystem router's catch-all route module,
 // src/routes/[...rest].tsx, builds to a chunk named after its file, and the
 // bundler's default sanitizer only swaps the brackets: the chunk came out as
 // `_...rest_-<hash>.js` and the CSS asset Vite names after it as
 // `_..-<hash>.css`. server.js, like many hosts and middleware, refuses every
 // URL containing `..`, so the lazy route's preload fell through to SSR and
-// came back as HTML. The plugin now collapses dot runs in client file names,
+// came back as HTML. The plugin now collapses dot runs in built file names,
 // after the default or the user's sanitizer. The default build must carry no
-// `..` anywhere under dist/client, keep the catch-all's chunk and CSS under
-// the collapsed names (the CSS keeps its extension) and have server.js serve
-// both. SANITIZE_FILE_NAME=custom rebuilds with a user `sanitizeFileName`
-// the collapse composes with instead of replacing; SANITIZE_FILE_NAME=off
-// rebuilds with `sanitizeFileName: false`, the opt-out the plugin leaves
-// alone (raw names).
+// `..` anywhere under dist/client or dist/server, keep the catch-all's chunk
+// and CSS under the collapsed names (the CSS keeps its extension) and have
+// server.js serve both. The route also renders mark..svg, whose URL the
+// server bundle writes itself: it must name a file under dist/client, which
+// only holds while both builds collapse. SANITIZE_FILE_NAME=custom rebuilds
+// with a user `sanitizeFileName` the collapse composes with instead of
+// replacing; SANITIZE_FILE_NAME=off rebuilds with `sanitizeFileName: false`,
+// the opt-out the plugin leaves alone (raw names).
 async function runFileNamesMode() {
   const mode = 'file-names';
   console.log(`\n=== ${mode.toUpperCase()} ===`);
@@ -2491,16 +2495,17 @@ async function runFileNamesMode() {
   const origin = `http://localhost:${port}`;
   const routeKey = 'src/routes/[...rest].tsx';
   const clientDir = path.join(exampleDir, 'dist/client');
+  const serverDir = path.join(exampleDir, 'dist/server');
   const build = (env) => {
     rmSync(path.join(exampleDir, 'dist'), { recursive: true, force: true });
     execSync('pnpm run build', { cwd: exampleDir, stdio: 'pipe', env });
     return JSON.parse(readFileSync(path.join(clientDir, '.vite/manifest.json'), 'utf-8'));
   };
-  // Every path under dist/client (files and directories), slash-separated.
-  const dottedClientPaths = () =>
-    readdirSync(clientDir, { recursive: true })
-      .map((p) => p.split(path.sep).join('/'))
-      .filter((p) => p.includes('..'));
+  // Every path under a dist directory (files and directories),
+  // slash-separated.
+  const distPaths = (dir) =>
+    readdirSync(dir, { recursive: true }).map((p) => p.split(path.sep).join('/'));
+  const dottedClientPaths = () => distPaths(clientDir).filter((p) => p.includes('..'));
 
   let server;
   let serverLog = '';
@@ -2527,6 +2532,22 @@ async function runFileNamesMode() {
       !!css && !css.includes('..') && css.endsWith('.css') && existsSync(path.join(clientDir, css)),
       `css: ${css}`,
     );
+    const dottedServer = distPaths(serverDir).filter((p) => p.includes('..'));
+    record(
+      mode,
+      'build',
+      'no dist/server path contains ".."',
+      !dottedServer.length,
+      dottedServer.join(', '),
+    );
+    const serverChunks = distPaths(serverDir).filter((p) => /(^|\/)_.*rest_-[\w-]+\.js$/.test(p));
+    record(
+      mode,
+      'build',
+      'server build names the catch-all chunk the same way (_.rest_-<hash>.js)',
+      serverChunks.length > 0 && serverChunks.every((p) => /(^|\/)_\.rest_-[\w-]+\.js$/.test(p)),
+      `server: ${serverChunks.join(', ')}`,
+    );
 
     server = startProcess('node', ['server.js'], {
       cwd: exampleDir,
@@ -2548,14 +2569,29 @@ async function runFileNamesMode() {
         page.html.includes(`/${css}`),
       `status ${page.status}`,
     );
+    // The server bundle computes this URL with its own sanitizer: it names
+    // a file under dist/client only while both builds collapse dot runs.
+    const markTag = page.html.match(/<img\b[^>]*\bid="catch-all-mark"[^>]*>/)?.[0];
+    const markSrc = markTag?.match(/\bsrc="([^"]*)"/)?.[1];
+    record(
+      mode,
+      'prod',
+      'SSR src of mark..svg names a file the client build wrote',
+      !!markSrc &&
+        markSrc.startsWith('/assets/') &&
+        !markSrc.includes('..') &&
+        existsSync(path.join(clientDir, markSrc)),
+      `src: ${markSrc}; client assets: ${(manifest[routeKey]?.assets ?? []).join(', ')}`,
+    );
     // server.js skips its static lookup for any URL containing `..`, so an
     // undotted name is what lets the asset through instead of the SSR page.
     for (const [name, file, type, marker] of [
       ['chunk', chunk, 'application/javascript', 'CATCH-ALL-PAGE'],
       ['CSS', css, 'text/css', 'catch-all'],
+      ['mark..svg', markSrc?.slice(1), 'image/svg+xml', '<svg'],
     ]) {
       if (!file) {
-        record(mode, 'prod', `server.js serves the catch-all ${name}`, false, 'no manifest record');
+        record(mode, 'prod', `server.js serves the catch-all ${name}`, false, 'no URL to fetch');
         continue;
       }
       const res = await fetch(`${origin}/${file}`);
