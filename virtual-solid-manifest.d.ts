@@ -40,6 +40,8 @@ declare module "virtual:solid-server-function-handler" {
 // manifest, and — when `serverFunctions` is enabled — serves the
 // server-function endpoint ahead of SSR.
 declare module "virtual:solid-ssr-handler" {
+  import type { CSPNonce } from "@solidjs/web";
+
   export function handleRequest(
     request: Request,
     options?: {
@@ -50,6 +52,17 @@ declare module "virtual:solid-ssr-handler" {
       /** Status/headers for the HTML response. */
       responseInit?: ResponseInit;
       /**
+       * Per-call CSP nonce, overriding `start.nonce`, in `@solidjs/web`'s
+       * `CSPNonce` shape. A string applies to scripts and styles; a
+       * `{ script, style }` pair routes each destination, with `false`
+       * leaving it un-nonced. It reaches the generated entry's
+       * `renderToStream` (hydration, streamed data and swap scripts,
+       * `modulepreload` links), the injected client-entry tag and the
+       * post-flush redirect fallback; authored entries receive it as
+       * `context.nonce`.
+       */
+      nonce?: CSPNonce;
+      /**
        * Per-call render mode, overriding `start.renderMode` (static value or
        * per-request module alike). `'stream'` flushes the document shell
        * with `<Loading>` fallbacks and streams boundary content behind it;
@@ -59,17 +72,6 @@ declare module "virtual:solid-ssr-handler" {
        * `Location` becomes a real 3xx under `'async'`.
        */
       renderMode?: 'stream' | 'async';
-      /**
-       * Per-call CSP nonce, overriding `start.nonce` — `@solidjs/web`'s
-       * `CSPNonce`. A string applies to scripts and styles; a
-       * `{ script, style }` object routes each destination, with `false`
-       * leaving it un-nonced. Reaches the
-       * generated entry's `renderToStream` (hydration, streamed data and
-       * swap scripts, `modulepreload` links), the injected client-entry tag
-       * and the post-flush redirect fallback; authored entries receive it
-       * as `context.nonce`.
-       */
-      nonce?: string | { script: string | false; style: string | false };
       /**
        * Extra fields spread into the request event at creation — the public
        * wrapper→event extension seam. Conventionally `nativeEvent` carries

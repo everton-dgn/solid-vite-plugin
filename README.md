@@ -620,18 +620,17 @@ export default function nonce(event: RequestEvent) {
 
 The handler passes the resolved nonce to the generated entry's
 `renderToStream`, so the hydration bootstrap, the streamed data and swap
-scripts and the `modulepreload` links all carry it, and to the injected
-client-entry tag and the post-flush redirect fallback — in dev as well, where
-the head tags the handler injects carry it too: the style patch and Vite
-client scripts (with `'strict-dynamic'`, the modules they load are trusted in
-turn), the collected styles, and a `csp-nonce` meta the Vite client reads for
-the styles it injects. Inline scripts your
-own `Document` renders still need it spelled out
-(`nonce={getRequestEvent()?.locals.nonce}`). Authored entries receive the
-value as `context.nonce` in `render()`. Hosts driving the handler directly
-can pass `handleRequest(request, { nonce })`, which wins over the module.
-Server mode only — the client-mode shell is prerendered once at build time,
-so there is no request to take a nonce from.
+scripts and the `modulepreload` links all carry it. The injected client-entry
+tag and the post-flush redirect fallback get it too, in dev as well, where the
+head tags the handler injects also carry it: the style patch and Vite client
+scripts (with `'strict-dynamic'`, the modules they load are trusted in turn),
+the collected styles, and a `csp-nonce` meta the Vite client reads for the
+styles it injects. Inline scripts your own `Document` renders still need it
+spelled out (`nonce={getRequestEvent()?.locals.nonce}`). Authored entries
+receive the value as `context.nonce` in `render()`. Hosts driving the handler
+directly can pass `handleRequest(request, { nonce })`, which wins over the
+module. Server mode only: the client-mode shell is prerendered once at build
+time, so there is no request to take a nonce from.
 
 **`env`** — first-party typed environment variables. A schema file at the
 project root — `env.ts` (or `env.js`), probed automatically; point
