@@ -1067,14 +1067,20 @@ function defaultSanitizeFileName(name: string): string {
  * instead of being dropped because the bundler splits `[name]` and
  * `[extname]` off the sanitized name: an asset whose own name has dots
  * against its extension (`logo..png`) would otherwise lose it and build to
- * `logopng-<hash>.`.
+ * `logopng-<hash>.`. Only the last path segment is touched: with
+ * `preserveModules` the name carries the module's directories, and changing a
+ * directory such as `my..lib` makes the bundler reject the name.
  */
 function collapseDotRuns(
   sanitizeFileName: true | ((name: string) => string) | undefined,
 ): (name: string) => string {
   const sanitize =
     typeof sanitizeFileName === 'function' ? sanitizeFileName : defaultSanitizeFileName;
-  return (name) => sanitize(name).replace(/\.{2,}/g, '.');
+  return (name) => {
+    const sanitized = sanitize(name);
+    const base = Math.max(sanitized.lastIndexOf('/'), sanitized.lastIndexOf('\\')) + 1;
+    return sanitized.slice(0, base) + sanitized.slice(base).replace(/\.{2,}/g, '.');
+  };
 }
 
 export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
