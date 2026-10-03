@@ -129,9 +129,11 @@
 //     names collapse the dot run, and server.js (which refuses any URL
 //     containing `..`) serves both; the server build collapses too, so the
 //     URL it writes for an asset named with a dot run (mark..svg) is the
-//     file the client build wrote; a user `sanitizeFileName`
-//     (SANITIZE_FILE_NAME=custom) still runs, with the collapse after it, and
-//     `sanitizeFileName: false` (SANITIZE_FILE_NAME=off) is left alone (#391),
+//     file the client build wrote; a user `sanitizeFileName` that produces
+//     dots still runs, with the collapse after it, whether set in the config
+//     (SANITIZE_FILE_NAME=custom) or from a later plugin's `outputOptions`
+//     hook (SANITIZE_FILE_NAME=plugin), and `sanitizeFileName: false`
+//     (SANITIZE_FILE_NAME=off) is left alone (#391),
 //   - `start.node` (node mode, START_NODE=1): the build emits a ready-to-run
 //     Node server entry, dist/server/node.js, beside server.js — statics
 //     (immutable assets, must-revalidate otherwise, HEAD, no traversal),
@@ -2485,9 +2487,12 @@ async function runExtraInputMode() {
 // server.js serve both. The route also renders mark..svg, whose URL the
 // server bundle writes itself: it must name a file under dist/client, which
 // only holds while both builds collapse. SANITIZE_FILE_NAME=custom rebuilds
-// with a user `sanitizeFileName` the collapse composes with instead of
-// replacing; SANITIZE_FILE_NAME=off rebuilds with `sanitizeFileName: false`,
-// the opt-out the plugin leaves alone (raw names).
+// with a user `sanitizeFileName` that turns the brackets into dots, so only
+// a collapse that runs after it leaves the name free of `..`;
+// SANITIZE_FILE_NAME=plugin sets that function from a later plugin's
+// `outputOptions` hook instead of the config; SANITIZE_FILE_NAME=off rebuilds
+// with `sanitizeFileName: false`, the opt-out the plugin leaves alone (raw
+// names).
 async function runFileNamesMode() {
   const mode = 'file-names';
   console.log(`\n=== ${mode.toUpperCase()} ===`);
@@ -2609,18 +2614,26 @@ async function runFileNamesMode() {
     } catch {}
     server = null;
 
-    console.log('  building with a user sanitizeFileName…');
-    manifest = build({ ...process.env, SANITIZE_FILE_NAME: 'custom' });
-    const customChunk = manifest[routeKey]?.file;
-    record(
-      mode,
-      'custom',
-      'user sanitizeFileName runs and the collapse follows it (~.rest~-<hash>.js)',
-      !!customChunk && /^assets\/~\.rest~-[\w-]+\.js$/.test(customChunk),
-      `file: ${customChunk}`,
-    );
-    dotted = dottedClientPaths();
-    record(mode, 'custom', 'no dist/client path contains ".."', !dotted.length, dotted.join(', '));
+    // The user function turns `[...rest]` into `....rest.`: collapsing after
+    // it gives `.rest.`, collapsing before it would leave `..rest.`, and the
+    // default sanitizer alone would give `_.rest_`.
+    for (const [variant, label] of [
+      ['custom', 'set in the config'],
+      ['plugin', "set from a later plugin's outputOptions hook"],
+    ]) {
+      console.log(`  building with a user sanitizeFileName ${label}…`);
+      manifest = build({ ...process.env, SANITIZE_FILE_NAME: variant });
+      const userChunk = manifest[routeKey]?.file;
+      record(
+        mode,
+        variant,
+        'user sanitizeFileName runs and the collapse follows it (.rest.-<hash>.js)',
+        !!userChunk && /^assets\/\.rest\.-[\w-]+\.js$/.test(userChunk),
+        `file: ${userChunk}`,
+      );
+      dotted = dottedClientPaths();
+      record(mode, variant, 'no dist/client path contains ".."', !dotted.length, dotted.join(', '));
+    }
 
     console.log('  building with sanitizeFileName: false…');
     manifest = build({ ...process.env, SANITIZE_FILE_NAME: 'off' });

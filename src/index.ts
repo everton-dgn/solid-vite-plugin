@@ -1912,21 +1912,27 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
       }
     },
 
-    outputOptions(outputOptions) {
-      // Every build environment, not just the client: client file names
-      // become URLs (see collapseDotRuns), and the server bundle writes the
-      // URLs of the assets it imports, computed with its own sanitizer.
-      // Collapsing on one side only would point server-rendered `src` and
-      // `href` attributes at files the client build never wrote. This hook
-      // sees the final output options, so it wraps whatever sanitizer the
-      // user or another plugin set, wherever it was configured.
-      // `sanitizeFileName: false` is left as is: it is the one spelling that
-      // asks for raw names, and wrapping it too would leave no way out.
-      if (!isBuild || outputOptions.sanitizeFileName === false) return null;
-      return {
-        ...outputOptions,
-        sanitizeFileName: collapseDotRuns(outputOptions.sanitizeFileName),
-      };
+    outputOptions: {
+      // Post order: this runs after every pre and normal `outputOptions`
+      // hook (and after post hooks earlier in the plugin array), so it wraps
+      // the sanitizer from the config or from those hooks instead of being
+      // replaced by a later one. A post hook further down can still override.
+      order: 'post',
+      handler(outputOptions) {
+        // Every build environment, not just the client: client file names
+        // become URLs (see collapseDotRuns), and the server bundle writes the
+        // URLs of the assets it imports, computed with its own sanitizer.
+        // Collapsing on one side only would point server-rendered `src` and
+        // `href` attributes at files the client build never wrote.
+        // `sanitizeFileName: false` is left as is: it is the one spelling
+        // that asks for raw names, and wrapping it too would leave no way
+        // out.
+        if (!isBuild || outputOptions.sanitizeFileName === false) return null;
+        return {
+          ...outputOptions,
+          sanitizeFileName: collapseDotRuns(outputOptions.sanitizeFileName),
+        };
+      },
     },
 
     generateBundle(outputOptions, bundle) {
