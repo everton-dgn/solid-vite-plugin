@@ -6142,6 +6142,7 @@ async function runNonceMode() {
       [{}, 'an empty object', 'keys []'],
       [{ script: 'a' }, 'a pair without style', '["script"]'],
       [{ script: 'a', style: 1 }, 'a pair with a number', '["script","style"]'],
+      [{ script: '', style: 'a' }, 'a pair with an empty script', '["script","style"]'],
     ]) {
       let rejection = '';
       try {
@@ -6229,6 +6230,18 @@ async function runNonceMode() {
           await handler.handleRequest(page({ 'x-csp-nonce': 'from-locals' }), {
             nonce: { script: false, style: false },
           })
+        ).text(),
+      ),
+    );
+    record(
+      mode,
+      'module',
+      'a module returning { script: false, style: false } sends the page without one',
+      carriesNone(
+        await (
+          await handler.handleRequest(
+            page({ 'x-csp-nonce-json': '{"script":false,"style":false}' }),
+          )
         ).text(),
       ),
     );
@@ -6346,7 +6359,14 @@ async function runNonceMode() {
       env: { ...process.env, SSR_DEVTOOLS: '0', ...moduleEnv },
     });
     await waitForHttp(devOrigin + '/src/api.ts', 30000);
-    for (const route of ['/', '/extra-input']) {
+    // The lazy page must render its content and its own stylesheet, or the
+    // check would pass on App.css alone.
+    const pageChecks = {
+      '/': () => true,
+      '/extra-input': (html, styles) =>
+        html.includes('EXTRA-INPUT-PAGE') && styles.some((tag) => tag.includes('ExtraInput.css')),
+    };
+    for (const [route, pageCheck] of Object.entries(pageChecks)) {
       const res = await fetch(devOrigin + route, {
         headers: {
           accept: 'text/html',
@@ -6369,7 +6389,11 @@ async function runNonceMode() {
         mode,
         'dev-server',
         `${route}: every <style> takes the style nonce, every <script> the script nonce`,
-        res.status === 200 && styles.length >= 1 && scripts.length >= 3 && off.length === 0,
+        res.status === 200 &&
+          pageCheck(html, styles) &&
+          styles.length >= 1 &&
+          scripts.length >= 3 &&
+          off.length === 0,
         `status ${res.status}, ${styles.length} styles, ${scripts.length} scripts, off: ${off.join(' ').slice(0, 300)}`,
       );
     }
