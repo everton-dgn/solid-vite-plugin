@@ -1337,7 +1337,9 @@ export function startServe(
     // CSP nonce (`start.nonce`): the `handleRequest` option wins, then the
     // configured module's per-request result. Both take @solidjs/web's
     // `CSPNonce` shape (a string for every destination, or a
-    // `{ script, style }` pair), and an empty result means no nonce.
+    // `{ script, style }` pair). An empty value (undefined, null or '')
+    // means none, as in the runtime, so an empty option leaves the nonce
+    // to the module.
     lines.push(
       ``,
       `function assertNonce(nonce, source) {`,
@@ -1366,7 +1368,8 @@ export function startServe(
         `    '((event) => CSPNonce | undefined | Promise<...>): ' + ${JSON.stringify(noncePath)});`,
         `}`,
         `async function resolveNonce(event, options) {`,
-        `  if (options.nonce !== undefined) return assertNonce(options.nonce, 'handleRequest options.nonce');`,
+        `  const nonce = assertNonce(options.nonce, 'handleRequest options.nonce');`,
+        `  if (nonce !== undefined) return nonce;`,
         `  return assertNonce(await nonceModule(event), 'the start.nonce module (' + ${JSON.stringify(noncePath)} + ') result');`,
         `}`,
       );

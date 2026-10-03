@@ -629,8 +629,9 @@ styles it injects. Inline scripts your own `Document` renders still need it
 spelled out (`nonce={getRequestEvent()?.locals.nonce}`). Authored entries
 receive the value as `context.nonce` in `render()`. Hosts driving the handler
 directly can pass `handleRequest(request, { nonce })`, which wins over the
-module. Server mode only: the client-mode shell is prerendered once at build
-time, so there is no request to take a nonce from.
+module unless it's empty (`undefined`, `null` or `''`). Server mode only: the
+client-mode shell is prerendered once at build time, so there is no request
+to take a nonce from.
 
 **`env`** — first-party typed environment variables. A schema file at the
 project root — `env.ts` (or `env.js`), probed automatically; point

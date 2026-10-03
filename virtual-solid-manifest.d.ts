@@ -55,7 +55,8 @@ declare module "virtual:solid-ssr-handler" {
        * Per-call CSP nonce, overriding `start.nonce`, in `@solidjs/web`'s
        * `CSPNonce` shape. A string applies to scripts and styles; a
        * `{ script, style }` pair routes each destination, with `false`
-       * leaving it un-nonced. It reaches the generated entry's
+       * leaving it un-nonced. An empty value (`undefined`, `null` or `''`)
+       * leaves the nonce to `start.nonce`. It reaches the generated entry's
        * `renderToStream` (hydration, streamed data and swap scripts,
        * `modulepreload` links), the injected client-entry tag and the
        * post-flush redirect fallback; authored entries receive it as
