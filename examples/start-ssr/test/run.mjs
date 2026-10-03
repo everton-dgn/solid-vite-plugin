@@ -2616,22 +2616,35 @@ async function runFileNamesMode() {
 
     // The user function turns `[...rest]` into `....rest.`: collapsing after
     // it gives `.rest.`, collapsing before it would leave `..rest.`, and the
-    // default sanitizer alone would give `_.rest_`.
+    // default sanitizer alone would give `_.rest_`. Rolldown refuses a
+    // `[name]` that starts with `..` (it reads as a relative path), so an
+    // uncollapsed run fails the build outright: record that and move on to
+    // the next variant.
     for (const [variant, label] of [
       ['custom', 'set in the config'],
       ['plugin', "set from a later plugin's outputOptions hook"],
     ]) {
       console.log(`  building with a user sanitizeFileName ${label}…`);
-      manifest = build({ ...process.env, SANITIZE_FILE_NAME: variant });
-      const userChunk = manifest[routeKey]?.file;
+      let userChunk;
+      let buildError = '';
+      try {
+        manifest = build({ ...process.env, SANITIZE_FILE_NAME: variant });
+        userChunk = manifest[routeKey]?.file;
+      } catch (e) {
+        const lines = String(e.stderr || e.message)
+          .replace(/\x1b\[[0-9;]*m/g, '')
+          .split('\n');
+        buildError =
+          'build failed: ' + (lines.find((l) => /\[[A-Z_]+\]/.test(l)) ?? lines[0]).trim();
+      }
       record(
         mode,
         variant,
         'user sanitizeFileName runs and the collapse follows it (.rest.-<hash>.js)',
         !!userChunk && /^assets\/\.rest\.-[\w-]+\.js$/.test(userChunk),
-        `file: ${userChunk}`,
+        buildError || `file: ${userChunk}`,
       );
-      dotted = dottedClientPaths();
+      dotted = buildError ? [buildError] : dottedClientPaths();
       record(mode, variant, 'no dist/client path contains ".."', !dotted.length, dotted.join(', '));
     }
 
