@@ -1521,10 +1521,12 @@ export function startServe(
       `  const renderMode = await resolveRenderMode(event, options);`,
       // Same window for the nonce: after the chain, so a middleware that
       // generated it (and set the CSP header) has stored it on `locals`.
-      // It goes after `options.context` so the render can't get a different
-      // value from the one the client-entry tag and the redirect fallback get.
+      // A resolved nonce goes over `options.context`, so the render can't
+      // get a different value from the one the client-entry tag and the
+      // redirect fallback get. Without one, a `nonce` the host put in
+      // `options.context` reaches the entry as before.
       `  const nonce = ${noncePath ? 'await ' : ''}resolveNonce(event, options);`,
-      `  let result = entry.render(request, { clientEntry, ...options.context, nonce });`,
+      `  let result = entry.render(request, { clientEntry, ...options.context, ...(nonce === undefined ? {} : { nonce }) });`,
       // renderToStream results are thenables whose then() waits for the
       // *complete* render — check for pipe first so streaming survives, and
       // only await plain promises (async render functions).
