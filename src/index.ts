@@ -1592,12 +1592,25 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
         // reach the same copy. Vitest projects manage their own inlining
         // (`test.server.deps` above) and are left alone, as is a host that
         // set `noExternal: true` (everything is inlined already).
+        //
+        // `seroval` and `seroval-plugins` split the same way: both ship a
+        // `dist/dev` build behind `development`, and `@solidjs/web` imports
+        // both. Left external, `seroval-plugins` loads through Node and its
+        // own `import "seroval"` lands on the prod copy, while the inlined
+        // `@solidjs/web` gets the runner's dev copy. Seroval tells a stream
+        // apart with `instanceof Stream`, so the `Stream` that
+        // `ReadableStreamPlugin` builds from one copy is rejected by the
+        // other's serializer ("cannot be parsed/serialized"). A server
+        // component that lands after the shell flushes hits this: its
+        // `sc:live` channel is a ReadableStream serialized into the document.
         if (!isTestMode && config.resolve.noExternal !== true) {
           const noExternal = config.resolve.noExternal;
           config.resolve.noExternal = [
             ...(Array.isArray(noExternal) ? noExternal : noExternal ? [noExternal] : []),
             'solid-js',
             '@solidjs/web',
+            'seroval',
+            'seroval-plugins',
           ];
         }
       }
