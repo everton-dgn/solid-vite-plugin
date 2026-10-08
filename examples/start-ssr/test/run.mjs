@@ -1520,6 +1520,43 @@ async function runProdMode() {
     styleOnlyRedirect.text.includes('<script>window.location='),
     styleOnlyRedirect.error,
   );
+  // An empty nonce means none, as in the runtime.
+  for (const empty of [null, '']) {
+    const emptyPage = await settledText(() =>
+      builtHandler.handleRequest(new Request(origin + '/'), { nonce: empty }),
+    );
+    record(
+      mode,
+      'build',
+      `an empty nonce (${JSON.stringify(empty)}) leaves the client entry un-nonced`,
+      emptyPage.text.includes('<script type="module" src="'),
+      emptyPage.error,
+    );
+  }
+  // Anything outside CSPNonce rejects the call itself, before the chain
+  // runs: the host's own error, not a contained request failure.
+  for (const [label, invalid] of [
+    ['a number', 42],
+    ['an array', ['x']],
+    ['a pair without style', { script: 'x' }],
+    ['a misspelled key', { scirpt: 'x', style: 'y' }],
+    ['an empty script', { script: '', style: 'y' }],
+    ['a number as style', { script: 'x', style: 1 }],
+  ]) {
+    const outcome = await builtHandler
+      .handleRequest(new Request(origin + '/'), { nonce: invalid })
+      .then(
+        (response) => `resolved ${response.status}`,
+        (error) => String(error),
+      );
+    record(
+      mode,
+      'build',
+      `an invalid nonce (${label}) rejects handleRequest`,
+      outcome.includes('handleRequest options.nonce must be'),
+      outcome,
+    );
+  }
   record(
     mode,
     'build',

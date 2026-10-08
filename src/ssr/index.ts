@@ -1263,6 +1263,31 @@ export function startServe(
       );
     }
 
+    // CSP nonce (`handleRequest(request, { nonce })`): @solidjs/web's
+    // `CSPNonce`, a string or a `{ script, style }` pair with both keys,
+    // each a non-empty string or `false`. An empty value (undefined, null or
+    // '') means none, as in the runtime. Anything else is rejected: projected
+    // as is, a typo'd key or a number would leave the tags without a nonce
+    // without a word.
+    lines.push(
+      ``,
+      `function assertNonce(nonce, source) {`,
+      `  if (nonce == null || typeof nonce === 'string') return nonce || undefined;`,
+      `  const prototype = typeof nonce === 'object' ? Object.getPrototypeOf(nonce) : undefined;`,
+      `  const destination = (value) => value === false || (typeof value === 'string' && value !== '');`,
+      `  if (`,
+      `    (prototype === Object.prototype || prototype === null) &&`,
+      `    Object.keys(nonce).every((key) => key === 'script' || key === 'style') &&`,
+      `    destination(nonce.script) &&`,
+      `    destination(nonce.style)`,
+      `  ) {`,
+      `    return nonce;`,
+      `  }`,
+      `  const got = Array.isArray(nonce) ? 'an array' : prototype ? 'an object with keys ' + JSON.stringify(Object.keys(nonce)) : typeof nonce;`,
+      `  throw new Error('[@solidjs/vite-plugin] ' + source + ' must be a string, a { script, style } object (each a non-empty string or false), or undefined; got ' + got);`,
+      `}`,
+    );
+
     // No `_$SC` bootstrap injection: the runtime's serialized
     // server-component references self-bootstrap the registry (each
     // hydration script's first reference carries it as an idempotent
@@ -1500,6 +1525,7 @@ export function startServe(
       // rejects up front, before the chain runs, instead of being contained
       // as a request failure.
       `  if (options.renderMode !== undefined) assertRenderMode(options.renderMode, 'handleRequest options.renderMode');`,
+      `  assertNonce(options.nonce, 'handleRequest options.nonce');`,
       // `options.event` is the public wrapper->event extension seam: extra
       // fields (conventionally `nativeEvent`, the platform's raw request
       // object) spread over the event's defaults at creation, so hosts and
