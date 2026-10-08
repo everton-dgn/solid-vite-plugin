@@ -13,7 +13,13 @@
 //     derived serverComponents flag) matches `true` exactly, and stays off
 //     when the option is off,
 //   - under full SSR start mode `'external'` is redundant but harmless:
-//     silent, exactly like `true`.
+//     silent, exactly like `true`,
+//   - independent of server components: `serverFunctions` alone (with or
+//     without `ssr`) pre-bundles the server-function client runtime under
+//     `serve` (the dependency scan never runs the transform that adds its
+//     import), listed once when components also ask for it; not without
+//     `serverFunctions`, not in build, and a custom `runtime.client` only as
+//     a package specifier, beside the components entries when both are on.
 //
 // Pure resolveConfig — no dev server, no browser. Requires the plugin built
 // (pnpm build at the repo root). Usage: node test/components-warning.mjs
@@ -81,6 +87,14 @@ async function resolveWith(solidOptions) {
     config.optimizeDeps.include.includes('@solidjs/web/frames') &&
       config.optimizeDeps.include.includes('@solidjs/web/server-functions'),
   );
+  const runtimeEntries = config.optimizeDeps.include.filter(
+    (dep) => dep === '@solidjs/web/server-functions',
+  );
+  record(
+    'enabled: server-function client runtime listed once',
+    runtimeEntries.length === 1,
+    config.optimizeDeps.include.join(', '),
+  );
 }
 
 // ---- `'external'` in the identical config: silent, still enabled ---------
@@ -123,6 +137,84 @@ async function resolveWith(solidOptions) {
       config.optimizeDeps.include.includes('@solidjs/web/performance-tracks'),
     config.optimizeDeps.include.join(', '),
   );
+  // Compiled server-function references import the client runtime, but the
+  // dependency scanner never runs the transform that adds that import.
+  // Without the entry, the first "use server" module the browser loads
+  // discovers it late: re-optimize and full reload.
+  record(
+    'serverFunctions without components: server-function client runtime pre-bundled',
+    config.optimizeDeps.include.includes('@solidjs/web/server-functions'),
+    config.optimizeDeps.include.join(', '),
+  );
+}
+
+// ---- serverFunctions without ssr: same entry -----------------------------
+{
+  const { config } = await resolveWith({ serverFunctions: true });
+  record(
+    'serverFunctions without ssr: server-function client runtime pre-bundled',
+    config.optimizeDeps.include.includes('@solidjs/web/server-functions'),
+    config.optimizeDeps.include.join(', '),
+  );
+}
+
+// ---- serverFunctions off: no server-function runtime pre-bundle -----------
+{
+  const { config } = await resolveWith({ ssr: true });
+  record(
+    'serverFunctions off: server-function client runtime not pre-bundled',
+    !config.optimizeDeps.include.includes('@solidjs/web/server-functions'),
+    config.optimizeDeps.include.join(', '),
+  );
+}
+
+// ---- custom runtime: only a package specifier is pre-bundled --------------
+{
+  const client = '@acme/server-runtime/client';
+  const { config } = await resolveWith({
+    ssr: true,
+    serverFunctions: { runtime: { server: '@acme/server-runtime/server', client } },
+  });
+  record(
+    'custom runtime (package): runtime.client pre-bundled instead of the default',
+    config.optimizeDeps.include.includes(client) &&
+      !config.optimizeDeps.include.includes('@solidjs/web/server-functions'),
+    config.optimizeDeps.include.join(', '),
+  );
+}
+{
+  const client = '@acme/server-runtime/client';
+  const { config } = await resolveWith({
+    ssr: true,
+    serverFunctions: {
+      components: true,
+      runtime: { server: '@acme/server-runtime/server', client },
+    },
+  });
+  record(
+    'components + custom runtime (package): runtime.client beside the components entries',
+    config.optimizeDeps.include.includes(client) &&
+      config.optimizeDeps.include.includes('@solidjs/web/server-functions'),
+    config.optimizeDeps.include.join(', '),
+  );
+}
+for (const client of [
+  './src/sf-client.ts',
+  '/src/sf-client.ts',
+  'virtual:sf-client',
+  '@/sf-client',
+  '~/sf-client',
+]) {
+  const { config } = await resolveWith({
+    ssr: true,
+    serverFunctions: { runtime: { server: client, client } },
+  });
+  record(
+    `custom runtime (${client}): neither it nor the default pre-bundled`,
+    !config.optimizeDeps.include.includes(client) &&
+      !config.optimizeDeps.include.includes('@solidjs/web/server-functions'),
+    config.optimizeDeps.include.join(', '),
+  );
 }
 
 // ---- build: optimizeDeps is serve-only, the entries stay out --------------
@@ -135,6 +227,21 @@ async function resolveWith(solidOptions) {
     'build: attribution / performance-tracks not in optimizeDeps.include',
     !config.optimizeDeps.include.includes('solid-js/attribution') &&
       !config.optimizeDeps.include.includes('@solidjs/web/performance-tracks'),
+    config.optimizeDeps.include.join(', '),
+  );
+}
+{
+  const config = await resolveConfig(
+    {
+      root: exampleDir,
+      configFile: false,
+      plugins: [solidPlugin({ ssr: true, serverFunctions: true })],
+    },
+    'build',
+  );
+  record(
+    'build: server-function client runtime not in optimizeDeps.include',
+    !config.optimizeDeps.include.includes('@solidjs/web/server-functions'),
     config.optimizeDeps.include.join(', '),
   );
 }

@@ -97,7 +97,14 @@
 //     middleware catching a render throw, and the post-next()
 //     header-mutation window on a streamed response — in dev and prod,
 //     plus codegen string assertions that the generated handler resolves
-//     commitEventResponse from @solidjs/web and folds after the unwind,
+//     commitEventResponse from @solidjs/web and folds after the unwind;
+//     a thrown redirect() or respond() envelope escaping the chain is the
+//     response (dev included), and any other escaping failure (middleware,
+//     start.setup, an in-process server-function call) is contained in
+//     production (preview and node too): a generic 500 with the stub
+//     cookie, the configureServerErrors hook hearing each error once (or
+//     console.error without one), while dev still hands it to the Vite
+//     overlay and its handler reports nothing itself,
 //   - `vite preview` serves the production artifact with no server file:
 //     dist/client statically, everything else (pages, /_server, middleware,
 //     the lifecycle) through the built handler,
@@ -124,6 +131,16 @@
 //     entry: the built handler boots the real entry chunk and links the entry
 //     graph's stylesheet even though the extra input is an `isEntry` record
 //     sorting ahead of it (#353),
+//   - built file names carry no `..` (file-names mode): the catch-all route
+//     module src/routes/[...rest].tsx builds to a chunk and a CSS asset whose
+//     names collapse the dot run, and server.js (which refuses any URL
+//     containing `..`) serves both; the server build collapses too, so the
+//     URL it writes for an asset named with a dot run (mark..svg) is the
+//     file the client build wrote; a user `sanitizeFileName` that produces
+//     dots still runs, with the collapse after it, whether set in the config
+//     (SANITIZE_FILE_NAME=custom) or from a later plugin's `outputOptions`
+//     hook (SANITIZE_FILE_NAME=plugin), and `sanitizeFileName: false`
+//     (SANITIZE_FILE_NAME=off) is left alone (#391),
 //   - `start.node` (node mode, START_NODE=1): the build emits a ready-to-run
 //     Node server entry, dist/server/node.js, beside server.js — statics
 //     (immutable assets, must-revalidate otherwise, HEAD, no traversal),
@@ -141,7 +158,7 @@
 //
 // Requires the plugin built (pnpm build at the repo root) and Google Chrome.
 // Usage: node test/run.mjs
-// [dev|prod|document|css-filter|entries|endpoint|configure|no-middleware|middleware|preview|render-mode|base|builder-order|builder-prepare|extra-input|babel-hmr|frames|external|observe|perf-tracks|detect|vitest|node]
+// [dev|prod|document|css-filter|entries|endpoint|configure|no-middleware|middleware|preview|render-mode|base|builder-order|builder-prepare|extra-input|file-names|babel-hmr|frames|external|observe|perf-tracks|detect|vitest|node]
 // (default: all)
 
 import { spawn, execSync, execFileSync } from 'node:child_process';
@@ -160,6 +177,7 @@ import {
 import http from 'node:http';
 import os from 'node:os';
 import {
+  build as viteBuild,
   createServer,
   createServerHotChannel,
   createServerModuleRunner,
@@ -2520,6 +2538,264 @@ async function runExtraInputMode() {
   }
 }
 
+// Built file names (#391): a filesystem router's catch-all route module,
+// src/routes/[...rest].tsx, builds to a chunk named after its file, and the
+// bundler's default sanitizer only swaps the brackets: the chunk came out as
+// `_...rest_-<hash>.js` and the CSS asset Vite names after it as
+// `_..-<hash>.css`. server.js, like many hosts and middleware, refuses every
+// URL containing `..`, so the lazy route's preload fell through to SSR and
+// came back as HTML. The plugin now collapses dot runs in built file names,
+// after the default or the user's sanitizer. The default build must carry no
+// `..` anywhere under dist/client or dist/server, keep the catch-all's chunk
+// and CSS under the collapsed names (the CSS keeps its extension) and have
+// server.js serve both. The route also renders mark..svg, whose URL the
+// server bundle writes itself: it must name a file under dist/client, which
+// only holds while both builds collapse. SANITIZE_FILE_NAME=custom rebuilds
+// with a user `sanitizeFileName` that turns the brackets into dots, so only
+// a collapse that runs after it leaves the name free of `..`;
+// SANITIZE_FILE_NAME=plugin sets that function from a later plugin's
+// `outputOptions` hook instead of the config; SANITIZE_FILE_NAME=off rebuilds
+// with `sanitizeFileName: false`, the opt-out the plugin leaves alone (raw
+// names).
+async function runFileNamesMode() {
+  const mode = 'file-names';
+  console.log(`\n=== ${mode.toUpperCase()} ===`);
+  const port = 3185;
+  const origin = `http://localhost:${port}`;
+  const routeKey = 'src/routes/[...rest].tsx';
+  const clientDir = path.join(exampleDir, 'dist/client');
+  const serverDir = path.join(exampleDir, 'dist/server');
+  const build = (env) => {
+    rmSync(path.join(exampleDir, 'dist'), { recursive: true, force: true });
+    execSync('pnpm run build', { cwd: exampleDir, stdio: 'pipe', env });
+    return JSON.parse(readFileSync(path.join(clientDir, '.vite/manifest.json'), 'utf-8'));
+  };
+  // Every path under a dist directory (files and directories),
+  // slash-separated.
+  const distPaths = (dir) =>
+    readdirSync(dir, { recursive: true }).map((p) => p.split(path.sep).join('/'));
+  const dottedClientPaths = () => distPaths(clientDir).filter((p) => p.includes('..'));
+
+  let server;
+  let serverLog = '';
+  try {
+    console.log('  building…');
+    let manifest = build(process.env);
+    let dotted = dottedClientPaths();
+    record(mode, 'build', 'no dist/client path contains ".."', !dotted.length, dotted.join(', '));
+    const chunk = manifest[routeKey]?.file;
+    const css = manifest[routeKey]?.css?.[0];
+    record(
+      mode,
+      'build',
+      'catch-all chunk emitted under the collapsed name (_.rest_-<hash>.js)',
+      !!chunk &&
+        /^assets\/_\.rest_-[\w-]+\.js$/.test(chunk) &&
+        existsSync(path.join(clientDir, chunk)),
+      `file: ${chunk}`,
+    );
+    record(
+      mode,
+      'build',
+      'catch-all CSS asset emitted without ".." and keeps its .css extension',
+      !!css && !css.includes('..') && css.endsWith('.css') && existsSync(path.join(clientDir, css)),
+      `css: ${css}`,
+    );
+    const dottedServer = distPaths(serverDir).filter((p) => p.includes('..'));
+    record(
+      mode,
+      'build',
+      'no dist/server path contains ".."',
+      !dottedServer.length,
+      dottedServer.join(', '),
+    );
+    const serverChunks = distPaths(serverDir).filter((p) => /(^|\/)_.*rest_-[\w-]+\.js$/.test(p));
+    record(
+      mode,
+      'build',
+      'server build names the catch-all chunk the same way (_.rest_-<hash>.js)',
+      serverChunks.length > 0 && serverChunks.every((p) => /(^|\/)_\.rest_-[\w-]+\.js$/.test(p)),
+      `server: ${serverChunks.join(', ')}`,
+    );
+
+    server = startProcess('node', ['server.js'], {
+      cwd: exampleDir,
+      env: { ...process.env, PORT: String(port), NODE_ENV: 'production' },
+    });
+    server.stdout.on('data', (d) => (serverLog += d));
+    server.stderr.on('data', (d) => (serverLog += d));
+    await waitForHttp(origin + '/', 30000, { headers: { accept: 'text/html' } });
+    const page = await fetchStreamed(origin + '/catch-all');
+    record(
+      mode,
+      'prod',
+      'catch-all route SSRs and links its chunk and CSS',
+      page.status === 200 &&
+        page.html.includes('CATCH-ALL-PAGE') &&
+        !!chunk &&
+        page.html.includes(`/${chunk}`) &&
+        !!css &&
+        page.html.includes(`/${css}`),
+      `status ${page.status}`,
+    );
+    // The server bundle computes this URL with its own sanitizer: it names
+    // a file under dist/client only while both builds collapse dot runs.
+    const markTag = page.html.match(/<img\b[^>]*\bid="catch-all-mark"[^>]*>/)?.[0];
+    const markSrc = markTag?.match(/\bsrc="([^"]*)"/)?.[1];
+    record(
+      mode,
+      'prod',
+      'SSR src of mark..svg names a file the client build wrote',
+      !!markSrc &&
+        markSrc.startsWith('/assets/') &&
+        !markSrc.includes('..') &&
+        existsSync(path.join(clientDir, markSrc)),
+      `src: ${markSrc}; client assets: ${(manifest[routeKey]?.assets ?? []).join(', ')}`,
+    );
+    // server.js skips its static lookup for any URL containing `..`, so an
+    // undotted name is what lets the asset through instead of the SSR page.
+    for (const [name, file, type, marker] of [
+      ['chunk', chunk, 'application/javascript', 'CATCH-ALL-PAGE'],
+      ['CSS', css, 'text/css', 'catch-all'],
+      ['mark..svg', markSrc?.slice(1), 'image/svg+xml', '<svg'],
+    ]) {
+      if (!file) {
+        record(mode, 'prod', `server.js serves the catch-all ${name}`, false, 'no URL to fetch');
+        continue;
+      }
+      const res = await fetch(`${origin}/${file}`);
+      const body = await res.text();
+      record(
+        mode,
+        'prod',
+        `server.js serves the catch-all ${name}`,
+        res.status === 200 && res.headers.get('content-type') === type && body.includes(marker),
+        `GET /${file} → ${res.status} ${res.headers.get('content-type')}`,
+      );
+    }
+    try {
+      process.kill(-server.pid, 'SIGTERM');
+    } catch {}
+    server = null;
+
+    // The user function turns `[...rest]` into `....rest.`: collapsing after
+    // it gives `.rest.`, collapsing before it would leave `..rest.`, and the
+    // default sanitizer alone would give `_.rest_`. Rolldown refuses a
+    // `[name]` that starts with `..` (it reads as a relative path), so an
+    // uncollapsed run fails the build outright: record that and move on to
+    // the next variant.
+    for (const [variant, label] of [
+      ['custom', 'set in the config'],
+      ['plugin', "set from a later plugin's outputOptions hook"],
+    ]) {
+      console.log(`  building with a user sanitizeFileName ${label}…`);
+      let userChunk;
+      let buildError = '';
+      try {
+        manifest = build({ ...process.env, SANITIZE_FILE_NAME: variant });
+        userChunk = manifest[routeKey]?.file;
+      } catch (e) {
+        const lines = String(e.stderr || e.message)
+          .replace(/\x1b\[[0-9;]*m/g, '')
+          .split('\n');
+        buildError =
+          'build failed: ' + (lines.find((l) => /\[[A-Z_]+\]/.test(l)) ?? lines[0]).trim();
+      }
+      record(
+        mode,
+        variant,
+        'user sanitizeFileName runs and the collapse follows it (.rest.-<hash>.js)',
+        !!userChunk && /^assets\/\.rest\.-[\w-]+\.js$/.test(userChunk),
+        buildError || `file: ${userChunk}`,
+      );
+      dotted = buildError ? [buildError] : dottedClientPaths();
+      record(mode, variant, 'no dist/client path contains ".."', !dotted.length, dotted.join(', '));
+    }
+
+    console.log('  building with sanitizeFileName: false…');
+    manifest = build({ ...process.env, SANITIZE_FILE_NAME: 'off' });
+    const rawChunk = manifest[routeKey]?.file;
+    record(
+      mode,
+      'off',
+      'sanitizeFileName: false is left alone (raw [...rest]-<hash>.js)',
+      !!rawChunk && /^assets\/\[\.\.\.rest\]-[\w-]+\.js$/.test(rawChunk),
+      `file: ${rawChunk}`,
+    );
+
+    // preserveModules keeps each module's path in its name, `../` segments
+    // included, so the collapse only touches the last segment: a library
+    // built from a directory whose path has a dot run is rejected by the
+    // bundler if the directories change.
+    const dotLib = path.join(exampleDir, 'test-dot..lib');
+    rmSync(dotLib, { recursive: true, force: true });
+    mkdirSync(path.join(dotLib, 'src/card'), { recursive: true });
+    writeFileSync(
+      path.join(dotLib, 'src/index.tsx'),
+      "export { Button } from './Button';\nexport { Card } from './card/Card';\n",
+    );
+    writeFileSync(
+      path.join(dotLib, 'src/Button.tsx'),
+      'export function Button(props) {\n  return <button>{props.label}</button>;\n}\n',
+    );
+    writeFileSync(
+      path.join(dotLib, 'src/card/Card.tsx'),
+      'export function Card(props) {\n  return <section>{props.title}</section>;\n}\n',
+    );
+    let libFiles = [];
+    let libError = '';
+    try {
+      const { default: solid } = await import('@solidjs/vite-plugin');
+      await viteBuild({
+        configFile: false,
+        logLevel: 'silent',
+        root: dotLib,
+        plugins: [solid()],
+        build: {
+          outDir: 'out',
+          minify: false,
+          lib: { entry: 'src/index.tsx', formats: ['es'] },
+          rolldownOptions: {
+            external: [/^solid-js/, /^@solidjs\/web/],
+            output: { preserveModules: true },
+          },
+        },
+      });
+      libFiles = distPaths(path.join(dotLib, 'out')).sort();
+    } catch (e) {
+      libError = String(e && e.message ? e.message : e).replace(/\x1b\[[0-9;]*m/g, '');
+    } finally {
+      rmSync(dotLib, { recursive: true, force: true });
+    }
+    record(
+      mode,
+      'preserve-modules',
+      'a preserveModules build from a directory with a dot run keeps module paths',
+      // Lib mode names the files after the package; one per module.
+      !libError && libFiles.filter((f) => f.endsWith('.js')).length === 3,
+      libError.slice(0, 300) || libFiles.join(', '),
+    );
+  } catch (e) {
+    record(
+      mode,
+      'run',
+      'mode completed',
+      false,
+      String(e) + (serverLog ? `\nserver: ${serverLog.slice(-2000)}` : ''),
+    );
+  } finally {
+    if (server) {
+      try {
+        process.kill(-server.pid, 'SIGTERM');
+      } catch {}
+    }
+    // Leave dist in the standard state for anyone poking at it.
+    try {
+      execSync('pnpm run build', { cwd: exampleDir, stdio: 'pipe' });
+    } catch {}
+  }
+}
+
 // Builder-mode preparation: BUILD_PRE_WIPE=1 installs a nitro-v3-shaped
 // host in vite.config.ts — a pre-order `buildApp` hook that rm -rf's dist
 // before anything builds (nitro's `nitro:prepare`) and a post-order
@@ -3335,6 +3611,197 @@ async function runMiddlewareChecksOverHttp(mode, origin, functionId) {
   }
 }
 
+// Failures escaping the whole middleware chain (src/middleware.ts throws
+// from `first`, the outermost, outside its error middleware). A thrown
+// Response, or the Response a thrown respond() envelope carries, is the
+// response in dev and production alike. Production builds contain
+// everything else in the generated handler: the configureServerErrors hook
+// (or console.error without one) hears it once and the client gets a
+// bodyless 500, carrying the stub's cookies while the response head is still
+// open, so no host sees a rejection. Dev rethrows it to Vite's error
+// middleware (the overlay). `hooked`: the server runs with
+// SSR_SERVER_ERRORS=1, so middleware.ts registered a recording hook.
+// `setup`: start.setup is wired (SSR_SETUP=1), so /setup-throw fails there.
+async function runContainmentChecks(
+  mode,
+  origin,
+  { dev = false, hooked = false, setup = false, getLog } = {},
+) {
+  const marker = 'mw-throw-secret';
+  const markers = ['mw-throw-secret', 'late-throw-secret', 'direct-throw-secret'];
+  if (setup) markers.push('setup-throw-secret');
+  // Only what the server logs from here on (the log may span servers).
+  const logStart = getLog ? getLog().length : 0;
+  const logSince = () => getLog().slice(logStart);
+  const heardErrors = async () => {
+    const res = await fetch(origin + '/api/server-errors', {
+      headers: { accept: 'application/json' },
+    });
+    return res.ok ? await res.json() : null;
+  };
+  const get = (pathname) =>
+    fetch(origin + pathname, { redirect: 'manual', headers: { accept: 'text/html' } });
+
+  // Thrown control responses: the response itself, on every surface.
+  const redirected = await get('/mw-redirect');
+  await redirected.arrayBuffer();
+  record(
+    mode,
+    'contain',
+    'thrown redirect() becomes the response (302 + Location)',
+    redirected.status === 302 && redirected.headers.get('location') === '/redirected-target',
+    `status ${redirected.status}, location ${JSON.stringify(redirected.headers.get('location'))}`,
+  );
+  const enveloped = await get('/mw-envelope');
+  const envelopeBody = await enveloped.text();
+  record(
+    mode,
+    'contain',
+    'thrown respond() envelope answers its Response (status, header, JSON body)',
+    enveloped.status === 409 &&
+      enveloped.headers.get('x-envelope') === '1' &&
+      envelopeBody === JSON.stringify({ contained: 'envelope' }),
+    `status ${enveloped.status}, x-envelope ${enveloped.headers.get('x-envelope')}, body ${JSON.stringify(envelopeBody.slice(0, 80))}`,
+  );
+
+  const thrown = await get('/mw-throw');
+  const thrownBody = await thrown.text();
+  if (dev) {
+    record(
+      mode,
+      'contain',
+      'dev: an escaping middleware throw still reaches the Vite overlay (500 with the error)',
+      thrown.status === 500 && thrownBody.includes(marker),
+      `status ${thrown.status}, body ${JSON.stringify(thrownBody.slice(0, 80))}`,
+    );
+    if (hooked) {
+      const heard = await heardErrors();
+      record(
+        mode,
+        'contain',
+        'dev: the handler reports nothing itself (the hook never hears the throw)',
+        Array.isArray(heard) && !heard.some((e) => e.message.includes(marker)),
+        JSON.stringify(heard),
+      );
+    }
+    return;
+  }
+  record(
+    mode,
+    'contain',
+    'escaping middleware throw answers a generic 500 (no body, no error details)',
+    thrown.status === 500 && thrownBody === '',
+    `status ${thrown.status}, body ${JSON.stringify(thrownBody.slice(0, 80))}`,
+  );
+  const thrownCookies = (thrown.headers.getSetCookie ? thrown.headers.getSetCookie() : []).filter(
+    (cookie) => cookie.startsWith('mw-throw='),
+  );
+  record(
+    mode,
+    'contain',
+    'stub cookie written before the throw arrives exactly once',
+    thrownCookies.length === 1 && thrownCookies[0].startsWith('mw-throw=1'),
+    `set-cookie: ${JSON.stringify(thrownCookies)}`,
+  );
+  // The other escaping shapes all answer the same generic 500: a throw
+  // after next() returned the page, Response.error() (not a response to
+  // send), an uncaught in-process server-function failure, and a
+  // start.setup failure.
+  const generic = [
+    ['/mw-throw-late', 'a throw after next() returned the page'],
+    ['/mw-response-error', 'thrown Response.error()'],
+    ['/mw-direct-throw', 'an uncaught in-process server-function failure'],
+    ...(setup ? [['/setup-throw', 'a start.setup failure']] : []),
+  ];
+  for (const [pathname, label] of generic) {
+    const res = await get(pathname);
+    const body = await res.text();
+    record(
+      mode,
+      'contain',
+      `${label} answers the generic 500`,
+      res.status === 500 && body === '',
+      `status ${res.status}, body ${JSON.stringify(body.slice(0, 80))}`,
+    );
+  }
+  if (hooked) {
+    const heard = await heardErrors();
+    const heardFor = (secret) =>
+      Array.isArray(heard) ? heard.filter((e) => e.message.includes(secret)) : [];
+    const failedOnce = (secret) => {
+      const failures = heardFor(secret);
+      return (
+        failures.length === 1 &&
+        failures[0].kind === 'render' &&
+        failures[0].handling === 'failed' &&
+        failures[0].event === true
+      );
+    };
+    record(
+      mode,
+      'contain',
+      'configureServerErrors hook hears the failure once (render/failed, with the event)',
+      failedOnce('mw-throw-secret') && failedOnce('late-throw-secret'),
+      JSON.stringify(heard),
+    );
+    if (setup) {
+      record(
+        mode,
+        'contain',
+        'a start.setup failure reaches the hook once (render/failed, with the event)',
+        failedOnce('setup-throw-secret'),
+        JSON.stringify(heard),
+      );
+    }
+    // The runtime reported the direct call first (server-function/thrown);
+    // the handler's report of the same error object must not repeat it.
+    const direct = heardFor('direct-throw-secret');
+    record(
+      mode,
+      'contain',
+      'an in-process server-function failure is heard once, as the runtime first reported it',
+      direct.length === 1 &&
+        direct[0].kind === 'server-function' &&
+        direct[0].handling === 'thrown',
+      JSON.stringify(direct),
+    );
+    record(
+      mode,
+      'contain',
+      'thrown Responses and envelopes are not reported; Response.error() is',
+      Array.isArray(heard) &&
+        !heard.some(
+          (e) => e.message === 'Response 302' || e.message.startsWith('ResponseEnvelope'),
+        ) &&
+        heard.filter((e) => e.message === 'Response 0').length === 1,
+      JSON.stringify(heard),
+    );
+    // The hook replaced the log: give stderr a moment, then no original
+    // may be in it.
+    await new Promise((r) => setTimeout(r, 250));
+    record(
+      mode,
+      'contain',
+      'with a hook, the original errors stay out of the server log',
+      !markers.some((secret) => logSince().includes(secret)),
+      logSince().slice(-300),
+    );
+  } else {
+    let logged = false;
+    for (let i = 0; i < 20 && !logged; i++) {
+      logged = markers.every((secret) => logSince().includes(secret));
+      if (!logged) await new Promise((r) => setTimeout(r, 100));
+    }
+    record(
+      mode,
+      'contain',
+      'without a hook, the original errors go to console.error',
+      logged,
+      logSince().slice(-300),
+    );
+  }
+}
+
 async function runMiddlewareMode() {
   console.log(`\n=== MIDDLEWARE ===`);
   const devPort = 3172;
@@ -3344,11 +3811,14 @@ async function runMiddlewareMode() {
   // in front anyway.
   // SSR_INSTRUMENT rides along too: the instrument module's evidence is a
   // header the middleware sets, so it needs the chain in front as well.
+  // SSR_SERVER_ERRORS: the recording configureServerErrors hook the
+  // containment checks read back.
   const env = {
     ...process.env,
     SSR_MIDDLEWARE: '1',
     SSR_SETUP: '1',
     SSR_INSTRUMENT: '1',
+    SSR_SERVER_ERRORS: '1',
     SSR_DEVTOOLS: '0',
   };
 
@@ -3415,6 +3885,19 @@ async function runMiddlewareMode() {
         'edge fold runs after the middleware chain unwinds',
         unwind !== -1 && fold !== -1 && fold > unwind,
         `runMiddleware @ ${unwind}, fold @ ${fold}`,
+      );
+      // Dev containment is the thrown-Response half only: the catch answers
+      // a thrown Response or envelope and rethrows everything else to
+      // Vite's error middleware. Reporting (reportServerError from
+      // solid-js/internal) and the bodyless 500 are build-only.
+      record(
+        'mw-codegen',
+        'gen',
+        'dev handler catch rethrows failures (no reportServerError, no synthesized 500)',
+        code.includes('function containFailure') &&
+          code.includes('throw error') &&
+          !code.includes('reportServerError') &&
+          !code.includes('solid-js/internal'),
       );
       // The generated entry-server threads start.setup: awaited with the
       // request event before renderToStream, its result (or App) rendered.
@@ -3488,6 +3971,7 @@ async function runMiddlewareMode() {
     const clientModule = await (await fetch(devOrigin + '/src/api.ts')).text();
     functionId = extractFunctionId(clientModule, 'whoAmI');
     await runMiddlewareChecksOverHttp('mw-dev', devOrigin, functionId);
+    await runContainmentChecks('mw-dev', devOrigin, { dev: true, hooked: true });
     // Dev-only: a non-page request the chain does NOT handle falls back to
     // Vite's pipeline (its 404) instead of getting the page rendered at it.
     const unhandledPost = await fetch(devOrigin + '/no-such-route', { method: 'POST' });
@@ -3533,6 +4017,11 @@ async function runMiddlewareMode() {
     // Identity-keyed ids are the same in dev and prod (solidjs/solid#3109).
     const prodId = functionId;
     await runMiddlewareChecksOverHttp('mw-prod', prodOrigin, prodId);
+    await runContainmentChecks('mw-prod', prodOrigin, {
+      hooked: true,
+      setup: true,
+      getLog: () => serverLog,
+    });
     await runHttpChecks('mw-prod', prodOrigin);
   } catch (e) {
     record(
@@ -3569,7 +4058,15 @@ async function runPreviewMode() {
   // entry that threads it exactly like dev and prod.
   // SSR_INSTRUMENT too: `vite preview` serves the built handler, so the
   // instrument sequencing is asserted on the third surface here.
-  const env = { ...process.env, SSR_MIDDLEWARE: '1', SSR_SETUP: '1', SSR_INSTRUMENT: '1' };
+  // SSR_SERVER_ERRORS: the containment checks' recording hook, as in
+  // middleware mode.
+  const env = {
+    ...process.env,
+    SSR_MIDDLEWARE: '1',
+    SSR_SETUP: '1',
+    SSR_INSTRUMENT: '1',
+    SSR_SERVER_ERRORS: '1',
+  };
 
   let server;
   let serverLog = '';
@@ -3727,6 +4224,11 @@ async function runPreviewMode() {
     // The full chain contract — API GETs/POSTs and no-JS form POSTs
     // included — holds under preview like dev and prod.
     await runMiddlewareChecksOverHttp(mode, origin, null);
+    await runContainmentChecks(mode, origin, {
+      hooked: true,
+      setup: true,
+      getLog: () => serverLog,
+    });
 
     await runHttpChecks(mode, origin);
   } catch (e) {
@@ -4197,6 +4699,24 @@ async function runRenderModeMode() {
       'override',
       'handleRequest({ renderMode: "stream" }) beats the static async config',
       forcedStream.status === 200 && isStreamedMarkup(forcedStream.html),
+    );
+    // A bad per-call option is the host's own error: the built handler
+    // rejects it up front instead of containing it as a request failure.
+    let prodRejection = '';
+    try {
+      await built.handleRequest(
+        new Request(prodAsyncOrigin + '/', { headers: { accept: 'text/html' } }),
+        { renderMode: 'bogus' },
+      );
+    } catch (e) {
+      prodRejection = String(e && e.message ? e.message : e);
+    }
+    record(
+      'rm-prod-async',
+      'override',
+      'invalid runtime renderMode still rejects from the built handler (not contained)',
+      prodRejection.includes('renderMode') && prodRejection.includes('bogus'),
+      prodRejection.slice(0, 200) || 'resolved without error',
     );
 
     server = spawnProd(prodAsyncPort, { SSR_RENDER_MODE: 'async' });
@@ -5386,6 +5906,9 @@ async function runNodeMode() {
       echo.status === 200 && echoBody?.echoed?.via === 'node-entry',
       `status ${echo.status}, body ${JSON.stringify(echoBody)}`,
     );
+    // The handler contains a middleware failure before the entry's own
+    // catch could; no hook registered here, so the fallback log is asserted.
+    await runContainmentChecks(mode, origin, { getLog: () => serverLog });
     const bogus = await fetch(origin + '/_server/bogus-0', { method: 'POST' });
     record(
       mode,
@@ -5964,6 +6487,7 @@ const ALL_MODES = [
   'builder-order',
   'builder-prepare',
   'extra-input',
+  'file-names',
   'frames',
   'babel-hmr',
   'external',
@@ -5991,6 +6515,7 @@ for (const mode of modes) {
   else if (mode === 'builder-order') await runBuilderOrderMode();
   else if (mode === 'builder-prepare') await runBuilderPrepareMode();
   else if (mode === 'extra-input') await runExtraInputMode();
+  else if (mode === 'file-names') await runFileNamesMode();
   else if (mode === 'frames') await runFramesMode();
   else if (mode === 'babel-hmr') await runBabelHmrMode();
   else if (mode === 'external') await runExternalMode();
