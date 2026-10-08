@@ -582,6 +582,18 @@ function findPackageDir(name: string, root: string): string | undefined {
   }
 }
 
+/**
+ * Whether `id` looks like a package specifier (`name`, `name/sub`,
+ * `@scope/name/sub`), by syntax alone. Relative and absolute paths, ids with a
+ * protocol or drive (`virtual:`, `node:`, `C:`), subpath imports (`#x`) and
+ * aliases like `~/x` or `@/x` don't.
+ */
+function isPackageSpecifier(id: string): boolean {
+  if (!id || /^[./\\#~\0]/.test(id) || id.includes(':')) return false;
+  if (id.startsWith('@')) return /^@[^/]+\/[^/]/.test(id);
+  return true;
+}
+
 function getJestDomExport(setupFiles: string[], root: string) {
   if (setupFiles?.some((file) => /jest-dom/.test(file))) return undefined;
 
@@ -1057,6 +1069,21 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
   const serverComponentsOption =
     typeof options.serverFunctions === 'object' ? options.serverFunctions.components : undefined;
   const serverComponents = !!serverComponentsOption;
+  // The client runtime compiled server-function references import (the
+  // server-functions plugin's own default unless `runtime` is set), kept only
+  // when it names a package. A relative path or an alias is app source: the
+  // optimizer would bundle a copy nothing loads or, for `@/x`, serve that copy
+  // so edits stop showing up. A virtual id or `/src/x` doesn't resolve for
+  // `include` and only warns.
+  const serverFunctionsClientRuntime = options.serverFunctions
+    ? typeof options.serverFunctions === 'object' && options.serverFunctions.runtime
+      ? options.serverFunctions.runtime.client
+      : '@solidjs/web/server-functions'
+    : undefined;
+  const serverFunctionsClientDep =
+    serverFunctionsClientRuntime && isPackageSpecifier(serverFunctionsClientRuntime)
+      ? serverFunctionsClientRuntime
+      : undefined;
   // `start: true` is sugar for the empty options bag — one start mode,
   // two spellings — so normalize here and let everything downstream see a
   // single shape (`false` behaves exactly like omission).
@@ -1482,6 +1509,15 @@ export default function solidPlugin(options: Partial<Options> = {}): Plugin[] {
             // server-components runtime installs its response policy there).
             ...(command === 'serve' && serverComponents
               ? ['@solidjs/web/frames', '@solidjs/web/server-functions']
+              : []),
+            // Plain `serverFunctions` needs the runtime too: the scanner never
+            // runs the transform that adds its import, so the first "use server"
+            // module forces the same re-optimize + full reload (in Vitest
+            // browser mode, "Vite unexpectedly reloaded a test").
+            ...(command === 'serve' &&
+            serverFunctionsClientDep &&
+            !(serverComponents && serverFunctionsClientDep === '@solidjs/web/server-functions')
+              ? [serverFunctionsClientDep]
               : []),
             // The attribution engine and the Chrome performance-tracks
             // recorder are subpaths the scanner only sees when the app's own
